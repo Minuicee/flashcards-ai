@@ -18,6 +18,9 @@ from datetime import datetime
 
 #before
 # TODO make ai local
+# TODO ad spanish vocab
+# TODO forma of latin vocab
+# TODO take l1 l2 avrg
 
 
 # parameters for dev
