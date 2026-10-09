@@ -15,13 +15,14 @@ from datetime import datetime
 #after
 # TODO change gaussian range
 # TODO learning readiness / use data to predict learn span
+# TODO clustering with levensthein distance
 
 #before
 # TODO make ai local
 # TODO ad spanish vocab
 # TODO forma of latin vocab
 # TODO take l1 l2 avrg
-
+# TODO map out all layers
 
 # parameters for dev
     #print
