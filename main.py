@@ -13,15 +13,18 @@ import random
 from datetime import datetime
 
 #after
+# TODO map out layers and document
+# TODO linux downloadable
+# TODO test on windows
+
 # TODO change gaussian range
 # TODO learning readiness / use data to predict learn span
 # TODO cluster levensthein distance
 
 #before
 # TODO make ai local
-# TODO ad spanish vocab
 # TODO forma of latin vocab
-# TODO take l1 l2 avrg
+# TODO take l1 l2 avrg. oder das schlechtere?
 
 
 # parameters for dev
@@ -57,7 +60,7 @@ min_timer = 15
 min_timer_min = 5
 min_timer_max = 30
 max_fps = 60
-max_inactive_ticks = 450 #30ticks/second
+max_inactive_ticks = 900 #30ticks/second
     #ai parameters
 ema_alpha = 0.3
 time_normalization = 495000 #hours
@@ -76,7 +79,7 @@ exploration_factor_min = 0.5
 exploration_factor_max = 1.5
 slider_snap_sensitivity = 0.05
 focused_area = std_focused_area # cant be bigger than word_cap and n_words
-ignore_characters = " \x08'/(),-;¿?!\"\n.…"
+ignore_characters = " \x08'/(),-;¿?→!\"\n.…"
     #dataset manager tab-hold repeat (in milliseconds)
 manager_tab_initial_interval = 400.0
 manager_tab_repeat_decay = 900.0
@@ -178,6 +181,9 @@ class SRS:
         self.check_typing_start = True
         self.typing_start = 0
         self.input_text = ""
+        self.last_source_word = ""
+        self.last_target_word = ""
+        self.last_word_direction = 0
         self.pause_triggered = False
         self.pause_message = ""
         self.has_shown_initial_pause_message = False
@@ -292,6 +298,9 @@ class SRS:
         exploitation_count_before_pause = self.exploitation_count
         if self.current_index != -1:
             self.last_index = self.current_index
+            self.last_word_direction = self.current_translation_direction
+            self.last_source_word = self.source[self.current_index] if self.current_index < len(self.source) else ""
+            self.last_target_word = self.target[self.current_index] if self.current_index < len(self.target) else ""
 
         # get new index
         if not self.ignore_ai:
@@ -623,7 +632,11 @@ class SRS:
         self.save_data(correct)
 
         self.timer_running = True
-        self.ticks = len_timer if correct == 1 else len_timer * 2
+        if correct == 1:
+            self.ticks = len_timer
+        else:
+            word_count = max(1, len(self.filter(self.target[self.current_index])))
+            self.ticks = math.ceil(len_timer * math.sqrt(word_count))
         self.input_text = ""
 
 
@@ -652,7 +665,7 @@ class SRS:
             self.timer_halfway_announced = False
             self.timer_one_minute_announced = False
             self.input_text = ""
-            self.pause_triggered = False
+            self.trigger_pause()
         elif self.settings_timer_state == "running":
             self.settings_timer_state = "paused"
             self.settings_timer_remaining = max(0.0, self.settings_timer_end_time - time.time())
@@ -783,6 +796,11 @@ class SRS:
     def get_file_row_index(self, row_index):
         return starting_cap + row_index
 
+    def get_edit_file_paths(self, direction=None):
+        direction = self.last_word_direction if direction is None else direction
+        if direction == 0:
+            return "language1.csv", "language2.csv"
+        return "language2.csv", "language1.csv"
 
     def get_set_paths(self, folder=None):
         folder = folder or self.folder
@@ -1371,9 +1389,9 @@ class SRS:
                 
             # decide what to display
             if self.editing_step == 1:
-                display_word = f"{self.get_ui_text('Edit source', 'Quelle bearbeiten')}: {self.source[self.last_index]}"
+                display_word = f"{self.get_ui_text('Edit source', 'Quelle bearbeiten')}: {self.last_source_word}"
             elif self.editing_step == 2:
-                display_word = f"{self.get_ui_text('Edit target', 'Ziel bearbeiten')}: {self.target[self.last_index]}"
+                display_word = f"{self.get_ui_text('Edit target', 'Ziel bearbeiten')}: {self.last_target_word}"
             else:
                 if self.pause_triggered:
                     display_word = self.pause_message
@@ -2166,6 +2184,7 @@ class SRS:
                         self.trigger_settings_button()
                     elif event.key == pygame.K_e:
                         self.trigger_edit_button()
+                        continue
                     elif event.key == pygame.K_l:
                         self.trigger_loop_button()
                     elif event.key == pygame.K_d:
@@ -2193,11 +2212,19 @@ class SRS:
                         if event.key == pygame.K_RETURN:
                             if self.input_text != "": #add a second if statement since we want it to do nothing if return is pressed but text is empty
                                 if self.editing_step == 1:
-                                    self.rewrite_line(self.get_file_row_index(self.last_index), self.input_text, f"sets/{self.folder}/language1.csv")
-                                    self.input_text = self.target[self.last_index]
+                                    source_file, _ = self.get_edit_file_paths(self.last_word_direction)
+                                    self.rewrite_line(
+                                        self.get_file_row_index(self.last_index),
+                                        self.input_text,
+                                        f"sets/{self.folder}/{source_file}",
+                                        reload=False,
+                                    )
+                                    self.last_source_word = self.input_text.replace("\x05", "").strip().lower()
+                                    self.input_text = self.last_target_word
                                     self.editing_step = 2
                                 elif self.editing_step == 2:
-                                    self.rewrite_line(self.get_file_row_index(self.last_index), self.input_text, f"sets/{self.folder}/language2.csv")
+                                    _, target_file = self.get_edit_file_paths(self.last_word_direction)
+                                    self.rewrite_line(self.get_file_row_index(self.last_index), self.input_text, f"sets/{self.folder}/{target_file}")
                                     self.editing_step = 0
                                     self.input_text = ""
                                 else:
@@ -2790,9 +2817,9 @@ class SRS:
             self.editing_step = 0
             self.input_text = ""
 
-        elif not self.settings_clicked:
+        elif not self.settings_clicked and self.last_index != -1:
             self.trigger_pause()
-            self.input_text = self.source[self.last_index]
+            self.input_text = self.last_source_word
             self.editing_step = 1
 
 
@@ -2902,10 +2929,18 @@ class SRS:
             word_cap = 0
 
 
-    def rewrite_line(self, line, replacement, file):
+    def rewrite_line(self, line, replacement, file, reload=True):
         column = 0 if os.path.basename(file) == "language1.csv" else 1
-        self.update_full_set_cell(line, column, replacement)
-        self.reload_active_set()
+        cleaned_replacement = replacement.replace("\x05", "").strip()
+        self.update_full_set_cell(line, column, cleaned_replacement)
+
+        active_row = line - starting_cap
+        language = self.l1 if column == 0 else self.l2
+        if 0 <= active_row < len(language):
+            language[active_row] = cleaned_replacement.lower()
+
+        if reload:
+            self.reload_active_set()
 
 
 # run main
