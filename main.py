@@ -15,7 +15,7 @@ from datetime import datetime
 #after
 # TODO map out layers and document
 # TODO linux downloadable
-# TODO test on windows
+# TODO test on windows/ upgrade bat files
 
 # TODO change gaussian range
 # TODO learning readiness / use data to predict learn span
