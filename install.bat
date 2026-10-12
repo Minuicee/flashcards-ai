@@ -33,8 +33,8 @@ powershell -Command "Invoke-WebRequest -Uri %BASE%/img/gauss_button.png     -Out
 powershell -Command "Invoke-WebRequest -Uri %BASE%/img/pause_button.png     -OutFile img\pause_button.png     -ErrorAction SilentlyContinue"
 powershell -Command "Invoke-WebRequest -Uri %BASE%/img/stop_button.png     -OutFile img\stop_button.png     -ErrorAction SilentlyContinue"
 powershell -Command "Invoke-WebRequest -Uri %BASE%/img/start_button.png     -OutFile img\start_button.png     -ErrorAction SilentlyContinue"
-
-
+powershell -Command "Invoke-WebRequest -Uri %BASE%/img/folder_button.png     -OutFile img\folder_button.png     -ErrorAction SilentlyContinue"
+powershell -Command "Invoke-WebRequest -Uri %BASE%/img/help_button.png     -OutFile img\help_button.png     -ErrorAction SilentlyContinue"
 :: ---------------------------------
 :: Download all available sets
 :: ---------------------------------
