@@ -41,11 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='
 if errorlevel 1 echo Could not check for new datasets. Continuing with installed datasets.
 
 :: -------------------------------
-:: Run without terminal window
+:: Run with console so errors stay visible
 :: -------------------------------
-if exist "venv\Scripts\pythonw.exe" (
-    start "" "venv\Scripts\pythonw.exe" main.py
-) else (
-    echo pythonw.exe not found in venv.
-    pause
-)
+python main.py
+pause
