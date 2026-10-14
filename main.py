@@ -16,6 +16,7 @@ from datetime import datetime
 # TODO map out layers and document
 # TODO linux downloadable
 # TODO test on windows/ upgrade bat files
+# TODO timer ended -> stats
 
 # TODO change gaussian range
 # TODO learning readiness / use data to predict learn span
@@ -25,6 +26,8 @@ from datetime import datetime
 # TODO make ai local
 # TODO forma of latin vocab
 # TODO take l1 l2 avrg. oder das schlechtere?
+# TODO suchfunktion set manager
+# TODO test exploration factor change
 
 
 # parameters for dev
@@ -79,7 +82,7 @@ exploration_factor_min = 0.5
 exploration_factor_max = 1.5
 slider_snap_sensitivity = 0.05
 focused_area = std_focused_area # cant be bigger than word_cap and n_words
-ignore_characters = " \x08'/(),-;¿?→!\"\n.…"
+ignore_characters = " \x08'/(),-;+¿?→!\"\n.…"
     #dataset manager tab-hold repeat (in milliseconds)
 manager_tab_initial_interval = 400.0
 manager_tab_repeat_decay = 900.0
@@ -582,7 +585,7 @@ class SRS:
         exploration_chance = (
             1.0
             if n_explored < 3
-            else ((A/(n_explored+B)) + C) * (current_certainty ** D) * (avrg_certainty ** D) * self.exploration_factor * (E ** self.exploitation_count)
+            else ((A/(n_explored+B)) + C) * (current_certainty ** D) * (avrg_certainty ** D) * (self.exploration_factor ** D) * (E ** self.exploitation_count)
         )
         return_val = True if np.random.random() < exploration_chance else False # generate a number to see whether to explore
 
@@ -620,6 +623,15 @@ class SRS:
         return dp[len1][len2]
 
 
+    def append_input_character(self, text, character):
+        text += character
+        if text.endswith("/n"):
+            return text[:-2] + "ñ"
+        if text.endswith("/N"):
+            return text[:-2] + "Ñ"
+        return text
+
+
     def check_input(self): 
         correct = self.is_correct()
         self.increment_index()
@@ -636,7 +648,7 @@ class SRS:
             self.ticks = len_timer
         else:
             word_count = max(1, len(self.filter(self.target[self.current_index])))
-            self.ticks = math.ceil(len_timer * math.sqrt(word_count))
+            self.ticks = math.ceil(3 * len_timer * math.sqrt(word_count))
         self.input_text = ""
 
 
@@ -1376,6 +1388,7 @@ class SRS:
         if self.manager_mode is not None:
             self.draw_manager()
             return
+        explored_rect = None
         if not self.settings_clicked:
             if self.timer_running:
                 if self.ticks == 0:
@@ -1506,6 +1519,20 @@ class SRS:
 
         #* draw sliders
         if self.settings_clicked:
+            explored_count = int(np.count_nonzero(self.df.iloc[:, 3] != 0)) if not self.df.empty else 0
+            explored_percent = round(100 * explored_count / self.n_words) if self.n_words else 0
+            explored_label = self.get_ui_text("Explored", "Erkundet") + f": {explored_percent}%"
+            label_padding = int(0.06 * window_scale)
+            label_max_width = max(1, self.WIDTH - 2 * label_padding)
+            label_font_size = self.gaussian_font.get_height()
+            explored_surface = self.gaussian_font.render(explored_label, True, self.TEXT)
+            while explored_surface.get_width() > label_max_width and label_font_size > 1:
+                label_font_size -= 1
+                label_font = pygame.font.SysFont("calibri", label_font_size)
+                explored_surface = label_font.render(explored_label, True, self.TEXT)
+            explored_rect = explored_surface.get_rect(bottomright=(self.WIDTH - label_padding, self.HEIGHT - label_padding))
+            self.screen.blit(explored_surface, explored_rect)
+
             is_timer_active = self.settings_timer_state in ("running", "paused")
             timer_label = "            " if is_timer_active else self.get_ui_text("Set timer", "Timer einstellen")
             self.draw_slider(
@@ -1564,6 +1591,11 @@ class SRS:
                 hovered_tooltip = self.get_button_tooltip("help")
             elif self.language_button_hover:
                 hovered_tooltip = self.get_button_tooltip("language")
+            elif explored_rect is not None and explored_rect.collidepoint(pygame.mouse.get_pos()):
+                slider_tooltip = self.get_ui_text(
+                    "Percentage of words explored at least once",
+                    "Anteil der Wörter, die mindestens einmal erkundet wurden",
+                )
             elif self.cancel_button_hover:
                 hovered_tooltip = self.get_ui_text("Cancel timer", "Timer abbrechen")
             elif self.start_button_hover:
@@ -2237,7 +2269,7 @@ class SRS:
                             if self.check_typing_start:
                                 self.typing_start = time.time()
                                 self.check_typing_start = False
-                            self.input_text += event.unicode
+                            self.input_text = self.append_input_character(self.input_text, event.unicode)
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 self.mouse_hold = True
@@ -2424,7 +2456,7 @@ class SRS:
                 elif event.key == pygame.K_BACKSPACE:
                     self.manager_input = self.manager_input[:-1]
                 elif event.unicode and event.unicode.isprintable():
-                    self.manager_input += event.unicode
+                    self.manager_input = self.append_input_character(self.manager_input, event.unicode)
                 return
             if self.manager_mode == "confirm_delete":
                 if event.key in (pygame.K_RETURN, pygame.K_y):
@@ -2478,7 +2510,7 @@ class SRS:
                         self.manager_input = ""
                         self.manager_input_changed = True
                     elif event.unicode and event.unicode.isprintable():
-                        self.manager_input += event.unicode
+                        self.manager_input = self.append_input_character(self.manager_input, event.unicode)
                         self.manager_input_changed = True
                 elif event.key == pygame.K_UP:
                     self.manager_scroll = max(0, self.manager_scroll - 1)
