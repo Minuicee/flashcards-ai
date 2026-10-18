@@ -29,6 +29,11 @@ A vocabulary learning app built with **Pygame** that quizzes you on word pairs a
 ### Inactivity Pause
 - After 450 ticks (~15 seconds) of no input, the app pauses until a key is pressed
 
+### Statistics
+- Open the full-screen statistics view from the bar-chart button in the upper-right corner
+- Review live timer-session stats, the completed timer-session summary, app-session stats, and totals from previous sessions
+- Fully completed timer sessions of at least five minutes are stored in `data/sessions.json`; cancelled or shorter sessions are excluded
+
 ---
 
 ## AI Data

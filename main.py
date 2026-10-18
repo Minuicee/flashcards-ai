@@ -10,6 +10,7 @@ import math
 import sys
 import os
 import random
+import json
 import unicodedata
 from datetime import datetime
 
@@ -26,8 +27,8 @@ from datetime import datetime
 # TODO make ai local
 # TODO forma of latin vocab
 # TODO take l1 l2 avrg. oder das schlechtere?
-# TODO suchfunktion set manager
-# TODO test exploration factor change
+
+#! exploration factor change
 #! klammern?
 
 
@@ -160,6 +161,10 @@ class SRS:
             # index
         self.current_index = -1
         self.last_index = -1
+        self.recent_word_history = []
+        self.delete_confirmation_open = False
+        self.delete_history_position = -1
+        self.delete_confirmation_error = ""
         self.index = 0
         self.starting_index = 0
         self.n_words = 0
@@ -174,9 +179,25 @@ class SRS:
         self.settings_timer_end_time = 0.0
         self.settings_timer_duration = 0.0
         self.settings_timer_ended_at = 0.0
+        self.settings_timer_started_at = 0.0
         self.settings_timer_answered = 0
         self.settings_timer_correct = 0
         self.settings_timer_words = set()
+        self.settings_timer_new_words = set()
+        self.stats_open = False
+        self.stats_scroll_right = 0.0
+        self.stats_scroll_right_target = 0.0
+        self.stats_left_viewport = pygame.Rect(0, 0, 0, 0)
+        self.stats_right_viewport = pygame.Rect(0, 0, 0, 0)
+        self.app_session_started_at = time.time()
+        self.app_usage_total_seconds = 0.0
+        self.app_usage_checkpoint_at = time.time()
+        self.app_usage_last_saved_at = time.time()
+        self.app_session_answered = 0
+        self.app_session_correct = 0
+        self.app_session_words = set()
+        self.app_session_new_words = set()
+        self.saved_sessions = []
         self.timer_reveal_started_at = 0.0
         self.timer_halfway_announced = False
         self.timer_one_minute_announced = False
@@ -219,7 +240,8 @@ class SRS:
         self.manager_mode = None
         self.manager_sets = []
         self.manager_selected = 0
-        self.manager_scroll = 0
+        self.manager_scroll_offset = 0.0
+        self.manager_scroll_target = 0.0
         self.manager_input = ""
         self.manager_search_open = False
         self.manager_search_focused = False
@@ -257,7 +279,9 @@ class SRS:
         self.init_gui(width_ratio * window_scale, height_ratio * window_scale)
 
         self.init_data_folder()
+        self.saved_sessions = self.load_saved_sessions()
         self.init_user_data_info()
+        self.load_app_usage()
         self.init_set_config()
         self.init_folder()
         self.init_data()
@@ -365,6 +389,8 @@ class SRS:
             else:
                 self.source = self.l2
                 self.target = self.l1
+        if 0 <= self.current_index < self.n_words:
+            self.recent_word_history.append(self.get_file_row_index(self.current_index))
 
 
     def get_normalized_df(self, df=None, is_training=False):
@@ -666,10 +692,20 @@ class SRS:
 
     def check_input(self): 
         correct = self.is_correct()
+        word_key = (self.folder, self.current_index)
+        is_new_word = self.df.iloc[self.current_index, 3] == 0
+        self.app_session_answered += 1
+        self.app_session_correct += int(correct)
+        self.app_session_words.add(word_key)
+        if is_new_word:
+            self.app_session_new_words.add(word_key)
+
         if self.settings_timer_state in ("running", "paused"):
             self.settings_timer_answered += 1
             self.settings_timer_correct += int(correct)
-            self.settings_timer_words.add(self.current_index)
+            self.settings_timer_words.add(word_key)
+            if is_new_word:
+                self.settings_timer_new_words.add(word_key)
         self.increment_index()
 
         if correct == 1:
@@ -703,6 +739,7 @@ class SRS:
             self.settings_timer_ended_at = time.time()
             self.settings_timer_remaining = 0.0
             self.settings_timer_end_time = 0.0
+            self.complete_timer_session()
 
 
     def get_timer_display_text(self):
@@ -712,15 +749,17 @@ class SRS:
 
 
     def handle_start_button_click(self):
-        if self.settings_timer_state == "stopped":
+        if self.settings_timer_state in ("stopped", "ended"):
             pygame.display.set_caption("")
             self.settings_timer_state = "running"
             self.settings_timer_remaining = float(min_timer * 60)
             self.settings_timer_duration = self.settings_timer_remaining
             self.settings_timer_end_time = time.time() + self.settings_timer_remaining
+            self.settings_timer_started_at = time.time()
             self.settings_timer_answered = 0
             self.settings_timer_correct = 0
             self.settings_timer_words.clear()
+            self.settings_timer_new_words.clear()
             self.timer_halfway_announced = False
             self.timer_one_minute_announced = False
             self.input_text = ""
@@ -766,66 +805,264 @@ class SRS:
         self.settings_timer_end_time = 0.0
         self.settings_timer_duration = 0.0
         self.settings_timer_ended_at = 0.0
+        self.settings_timer_started_at = 0.0
+        self.settings_timer_answered = 0
+        self.settings_timer_correct = 0
+        self.settings_timer_words.clear()
+        self.settings_timer_new_words.clear()
         self.timer_reveal_started_at = 0.0
         self.timer_halfway_announced = False
         self.timer_one_minute_announced = False
 
 
-    def draw_timer_stats_overlay(self):
-        backdrop = pygame.Surface((self.WIDTH, self.HEIGHT), pygame.SRCALPHA)
-        backdrop.fill((0, 0, 0, 175))
-        self.screen.blit(backdrop, (0, 0))
+    def complete_timer_session(self):
+        duration_seconds = max(0, round(self.settings_timer_duration))
+        summary = {
+            "started_at": datetime.fromtimestamp(self.settings_timer_started_at).isoformat(timespec="seconds"),
+            "finished_at": datetime.fromtimestamp(self.settings_timer_ended_at).isoformat(timespec="seconds"),
+            "duration_seconds": duration_seconds,
+            "answers": self.settings_timer_answered,
+            "correct": self.settings_timer_correct,
+            "unique_words": len(self.settings_timer_words),
+            "new_words_explored": len(self.settings_timer_new_words),
+            "dataset": self.folder,
+            "vocabulary_size": self.n_words,
+        }
+        if self.settings_timer_duration >= 5 * 60:
+            self.save_completed_session(summary)
 
-        panel = pygame.Rect(
-            int(self.WIDTH * 0.1),
-            int(self.HEIGHT * 0.12),
-            int(self.WIDTH * 0.8),
-            int(self.HEIGHT * 0.76),
-        )
-        pygame.draw.rect(self.screen, "#171A3B", panel, border_radius=int(border_radius_ratio * window_scale))
-        pygame.draw.rect(
+
+    def load_saved_sessions(self):
+        sessions_path = "data/sessions.json"
+        if not os.path.exists(sessions_path):
+            return []
+        with open(sessions_path, "r", encoding="utf-8") as file:
+            sessions = json.load(file)
+        if not isinstance(sessions, list) or any(not isinstance(session, dict) for session in sessions):
+            raise ValueError(f"Invalid saved sessions data in {sessions_path}")
+        required_fields = {
+            "started_at",
+            "finished_at",
+            "duration_seconds",
+            "answers",
+            "correct",
+            "unique_words",
+            "new_words_explored",
+            "dataset",
+            "vocabulary_size",
+        }
+        for index, session in enumerate(sessions):
+            if not required_fields.issubset(session):
+                raise ValueError(f"Saved session {index} in {sessions_path} is missing required fields")
+        return sessions
+
+
+    def save_completed_session(self, session):
+        sessions_path = "data/sessions.json"
+        temporary_path = f"{sessions_path}.tmp"
+        sessions = self.saved_sessions + [session]
+        with open(temporary_path, "w", encoding="utf-8") as file:
+            json.dump(sessions, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+        os.replace(temporary_path, sessions_path)
+        self.saved_sessions = sessions
+
+
+    def load_app_usage(self):
+        usage_path = "user_data/app_usage.json"
+        if not os.path.exists(usage_path):
+            return
+        with open(usage_path, "r", encoding="utf-8") as file:
+            usage = json.load(file)
+        if not isinstance(usage, dict) or not isinstance(usage.get("total_seconds"), (int, float)):
+            raise ValueError(f"Invalid app usage data in {usage_path}")
+        self.app_usage_total_seconds = max(0.0, float(usage["total_seconds"]))
+        self.app_usage_checkpoint_at = time.time()
+        self.app_usage_last_saved_at = self.app_usage_checkpoint_at
+
+
+    def save_app_usage(self, force=False):
+        now = time.time()
+        if not force and now - self.app_usage_last_saved_at < 30:
+            return
+        self.app_usage_total_seconds += max(0.0, now - self.app_usage_checkpoint_at)
+        self.app_usage_checkpoint_at = now
+        usage_path = "user_data/app_usage.json"
+        temporary_path = f"{usage_path}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as file:
+            json.dump({"total_seconds": self.app_usage_total_seconds}, file)
+            file.write("\n")
+        os.replace(temporary_path, usage_path)
+        self.app_usage_last_saved_at = now
+
+
+    def format_stats_duration(self, seconds):
+        hours, remainder = divmod(max(0, int(seconds)), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
+
+
+    def draw_stats_column(self, surface, x, width, sections, heading_font, row_font):
+        y = int(0.025 * window_scale)
+        section_gap = int(0.08 * window_scale)
+        row_gap = int(0.04 * window_scale)
+        for heading, rows in sections:
+            heading_surface = heading_font.render(heading, True, self.TEXT)
+            surface.blit(heading_surface, (x, y))
+            y += heading_surface.get_height() + int(0.025 * window_scale)
+            pygame.draw.line(surface, self.COORDINATE_SYSTEM, (x, y), (x + width, y), 1)
+            y += int(0.05 * window_scale)
+            for label, value in rows:
+                label_surface = row_font.render(label, True, self.TEXT)
+                value_surface = row_font.render(str(value), True, self.BLUE)
+                surface.blit(label_surface, (x, y))
+                surface.blit(value_surface, value_surface.get_rect(topright=(x + width, y)))
+                y += max(label_surface.get_height(), value_surface.get_height()) + row_gap
+            y += section_gap
+        return y
+
+
+    def draw_scrollbar(self, viewport, content_height, scroll_offset):
+        max_scroll = max(0, content_height - viewport.height)
+        if not max_scroll:
+            return
+        track_x = viewport.right - int(0.045 * window_scale)
+        track = pygame.Rect(track_x, viewport.top, 2, viewport.height)
+        thumb_height = max(24, int(viewport.height * viewport.height / content_height))
+        thumb_y = track.top + int((viewport.height - thumb_height) * scroll_offset / max_scroll)
+        pygame.draw.line(self.screen, self.GRID_COLOR, track.midtop, track.midbottom, track.width)
+        pygame.draw.line(
             self.screen,
-            self.COORDINATE_SYSTEM,
-            panel,
-            width=max(1, int(0.012 * window_scale)),
-            border_radius=int(border_radius_ratio * window_scale),
+            self.BLUE,
+            (track.centerx, thumb_y),
+            (track.centerx, thumb_y + thumb_height),
+            max(2, int(0.015 * window_scale)),
         )
 
-        title_font = pygame.font.Font(pygame.font.get_default_font(), max(24, int(0.15 * window_scale)))
-        row_font = pygame.font.Font(pygame.font.get_default_font(), max(16, int(0.085 * window_scale)))
-        hint_font = pygame.font.Font(pygame.font.get_default_font(), max(12, int(0.06 * window_scale)))
-        title = title_font.render(self.get_ui_text("Timer finished", "Timer beendet"), True, self.TEXT)
-        self.screen.blit(title, title.get_rect(center=(panel.centerx, panel.top + int(panel.height * 0.18))))
 
-        accuracy = (
-            round(100 * self.settings_timer_correct / self.settings_timer_answered)
-            if self.settings_timer_answered
+    def draw_stats(self):
+        title_font = pygame.font.SysFont("calibri", max(28, int(0.19 * window_scale)), bold=True)
+        heading_font = pygame.font.SysFont("calibri", max(18, int(0.11 * window_scale)), bold=True)
+        row_font = pygame.font.SysFont("calibri", max(14, int(0.075 * window_scale)))
+        margin = int(0.08 * self.WIDTH)
+        gutter = int(0.08 * self.WIDTH)
+        column_width = (self.WIDTH - 2 * margin - gutter) // 2
+        content_top = max(int(0.42 * window_scale), title_font.get_height() + int(0.08 * window_scale))
+        viewport_bottom = self.HEIGHT - int(0.08 * window_scale)
+        viewport_height = max(1, viewport_bottom - content_top)
+        self.stats_left_viewport = pygame.Rect(margin, content_top, column_width, viewport_height)
+        right_x = margin + column_width + gutter
+        self.stats_right_viewport = pygame.Rect(right_x, content_top, column_width, viewport_height)
+
+        title_surface = title_font.render(self.get_ui_text("Statistics", "Statistiken"), True, self.TEXT)
+        self.screen.blit(
+            title_surface,
+            title_surface.get_rect(midtop=(self.WIDTH // 2, int(0.08 * window_scale))),
+        )
+
+        session_elapsed = time.time() - self.app_session_started_at
+        session_accuracy = (
+            round(100 * self.app_session_correct / self.app_session_answered)
+            if self.app_session_answered
             else 0
         )
-        duration_seconds = round(self.settings_timer_duration)
-        minutes, seconds = divmod(duration_seconds, 60)
-        stats = [
-            (self.get_ui_text("Cards answered", "Beantwortete Karten"), str(self.settings_timer_answered)),
-            (self.get_ui_text("Correct answers", "Richtige Antworten"), str(self.settings_timer_correct)),
-            (self.get_ui_text("Accuracy", "Trefferquote"), f"{accuracy}%"),
-            (self.get_ui_text("Unique words", "Einzigartige Wörter"), str(len(self.settings_timer_words))),
-            (self.get_ui_text("Study time", "Lernzeit"), f"{minutes:02d}:{seconds:02d}"),
+        whole_session_rows = [
+            (self.get_ui_text("Time in app", "Zeit in der App"), self.format_stats_duration(session_elapsed)),
+            (self.get_ui_text("Cards answered", "Beantwortete Karten"), self.app_session_answered),
+            (self.get_ui_text("Correct answers", "Richtige Antworten"), self.app_session_correct),
+            (self.get_ui_text("Accuracy", "Trefferquote"), f"{session_accuracy}%"),
+            (self.get_ui_text("Unique words", "Einzigartige Wörter"), len(self.app_session_words)),
+            (self.get_ui_text("New Words Explored", "Neu erkundete Wörter"), len(self.app_session_new_words)),
         ]
-        row_height = int(panel.height * 0.11)
-        first_row_y = panel.top + int(panel.height * 0.34)
-        for row, (label, value) in enumerate(stats):
-            y = first_row_y + row * row_height
-            label_surface = row_font.render(label, True, self.TEXT)
-            value_surface = row_font.render(value, True, self.BLUE)
-            self.screen.blit(label_surface, label_surface.get_rect(midleft=(panel.left + int(panel.width * 0.1), y)))
-            self.screen.blit(value_surface, value_surface.get_rect(midright=(panel.right - int(panel.width * 0.1), y)))
 
-        hint = hint_font.render(
-            self.get_ui_text("Press any key or click to continue", "Zum Fortfahren Taste drücken oder klicken"),
-            True,
-            self.TEXT,
+        general_rows = [
+            (
+                self.get_ui_text("Time in App", "Zeit in der App"),
+                self.format_stats_duration(
+                    self.app_usage_total_seconds + time.time() - self.app_usage_checkpoint_at
+                ),
+            ),
+            (self.get_ui_text("Completed timer sessions", "Abgeschlossene Timer-Sessions"), len(self.saved_sessions)),
+            (self.get_ui_text("Total cards answered", "Beantwortete Karten insgesamt"), sum(session["answers"] for session in self.saved_sessions)),
+        ]
+        sections_left = [
+            (self.get_ui_text("Whole Session Stats", "Gesamte Session-Statistiken"), whole_session_rows),
+            (self.get_ui_text("General Stats", "Allgemeine Statistiken"), general_rows),
+        ]
+
+        saved_sessions = sorted(self.saved_sessions, key=lambda session: session["started_at"], reverse=True)
+        history_rows = []
+        for session in saved_sessions:
+            started_at = datetime.fromisoformat(session["started_at"])
+            date_label = (
+                started_at.strftime("%d.%m.%Y %H:%M")
+                if self.ui_language == "de"
+                else started_at.strftime("%Y-%m-%d %H:%M")
+            )
+            details = (
+                f"{self.format_stats_duration(session['duration_seconds'])} · "
+                f"+{session['new_words_explored']} {self.get_ui_text('new', 'neu')}"
+            )
+            history_rows.append((date_label, details))
+        if not history_rows:
+            history_rows.append((self.get_ui_text("No completed sessions yet", "Noch keine Sessions abgeschlossen"), ""))
+
+        sections_right = [
+            (self.get_ui_text("Session History", "Session-Verlauf"), history_rows),
+        ]
+
+        def content_height(sections):
+            heading_spacing = int(0.075 * window_scale)
+            row_gap = int(0.04 * window_scale)
+            section_gap = int(0.08 * window_scale)
+            return int(0.025 * window_scale) + sum(
+                heading_font.get_height()
+                + heading_spacing
+                + len(rows) * (row_font.get_height() + row_gap)
+                + section_gap
+                for _, rows in sections
+            )
+
+        left_content_height = max(self.stats_left_viewport.height, content_height(sections_left))
+        right_content_height = max(self.stats_right_viewport.height, content_height(sections_right))
+        max_right_scroll = max(0, right_content_height - self.stats_right_viewport.height)
+        self.stats_scroll_right_target = min(max(0, self.stats_scroll_right_target), max_right_scroll)
+        self.stats_scroll_right += (self.stats_scroll_right_target - self.stats_scroll_right) * 0.24
+        if abs(self.stats_scroll_right_target - self.stats_scroll_right) < 0.5:
+            self.stats_scroll_right = self.stats_scroll_right_target
+
+        scrollbar_space = int(0.12 * window_scale)
+        left_content = pygame.Surface((self.stats_left_viewport.width, left_content_height), pygame.SRCALPHA)
+        self.draw_stats_column(
+            left_content,
+            0,
+            self.stats_left_viewport.width,
+            sections_left,
+            heading_font,
+            row_font,
         )
-        self.screen.blit(hint, hint.get_rect(center=(panel.centerx, panel.bottom - int(panel.height * 0.1))))
+        old_clip = self.screen.get_clip()
+        self.screen.set_clip(self.stats_left_viewport)
+        self.screen.blit(left_content, self.stats_left_viewport.topleft)
+        self.screen.set_clip(old_clip)
+
+        right_content = pygame.Surface((self.stats_right_viewport.width, right_content_height), pygame.SRCALPHA)
+        self.draw_stats_column(
+            right_content,
+            0,
+            self.stats_right_viewport.width - scrollbar_space,
+            sections_right,
+            heading_font,
+            row_font,
+        )
+        self.screen.set_clip(self.stats_right_viewport)
+        self.screen.blit(
+            right_content,
+            (self.stats_right_viewport.left, self.stats_right_viewport.top - round(self.stats_scroll_right)),
+        )
+        self.screen.set_clip(old_clip)
+        self.draw_scrollbar(self.stats_right_viewport, right_content_height, self.stats_scroll_right)
+        self.draw_stats_button()
 
 
     def commit_manager_cell(self):
@@ -879,6 +1116,139 @@ class SRS:
         self.write_full_set(language1, language2, data)
         self.reload_active_set()
         return deleted_word
+
+
+    def open_delete_confirmation(self):
+        if not self.recent_word_history:
+            return
+        self.delete_confirmation_open = True
+        self.delete_history_position = len(self.recent_word_history) - 1
+        self.delete_confirmation_error = ""
+
+
+    def confirm_delete_recent_word(self):
+        if not 0 <= self.delete_history_position < len(self.recent_word_history):
+            self.delete_confirmation_open = False
+            return
+
+        recent_word_history = self.recent_word_history.copy()
+        deleted_file_row_index = self.recent_word_history[self.delete_history_position]
+        starting_cap_before_delete = starting_cap
+        row_index = deleted_file_row_index - starting_cap_before_delete
+        if not 0 <= row_index < self.n_words:
+            self.delete_confirmation_error = self.get_ui_text(
+                "This word is no longer in the active range.",
+                "Dieses Wort liegt nicht mehr im aktiven Bereich.",
+            )
+            return
+        deleted_word = self.delete_row(row_index)
+        if deleted_word is None:
+            self.delete_confirmation_error = self.get_ui_text(
+                "This dataset needs at least two rows.",
+                "Dieser Datensatz muss mindestens zwei Zeilen enthalten.",
+            )
+            return
+
+        self.recent_word_history = [
+            history_index - (history_index > deleted_file_row_index)
+            for history_index in recent_word_history
+            if history_index != deleted_file_row_index
+        ]
+        self.delete_history_position = len(self.recent_word_history) - 1
+
+        def remap_session_words(words):
+            remapped = set()
+            for folder, index in words:
+                if folder == self.folder:
+                    file_row_index = starting_cap_before_delete + index
+                    if file_row_index == deleted_file_row_index:
+                        continue
+                    file_row_index -= file_row_index > deleted_file_row_index
+                    index = file_row_index - starting_cap
+                remapped.add((folder, index))
+            return remapped
+
+        for attribute in ("app_session_words", "app_session_new_words", "settings_timer_words", "settings_timer_new_words"):
+            setattr(self, attribute, remap_session_words(getattr(self, attribute)))
+
+        self.input_text = ""
+        self.pause_triggered = True
+        self.pause_message = self.get_ui_text(
+            "Word deleted. Press any key to continue.",
+            "Wort gelöscht. Beliebige Taste zum Fortfahren drücken.",
+        )
+        self.delete_confirmation_open = False
+        self.delete_confirmation_error = ""
+
+
+    def draw_delete_confirmation(self):
+        overlay = pygame.Surface((self.WIDTH, self.HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 170))
+        self.screen.blit(overlay, (0, 0))
+
+        panel = self.delete_confirmation_rect
+        pygame.draw.rect(self.screen, "#171A3B", panel, border_radius=int(border_radius_ratio * window_scale))
+        pygame.draw.line(
+            self.screen,
+            self.COORDINATE_SYSTEM,
+            (panel.left + int(0.16 * window_scale), panel.top + int(0.42 * window_scale)),
+            (panel.right - int(0.16 * window_scale), panel.top + int(0.42 * window_scale)),
+            max(1, int(0.01 * window_scale)),
+        )
+
+        title_font = pygame.font.SysFont("calibri", max(22, int(0.15 * window_scale)), bold=True)
+        title = title_font.render(self.get_ui_text("Delete last word?", "Letztes Wort löschen?"), True, self.TEXT)
+        self.screen.blit(title, title.get_rect(midtop=(panel.centerx, panel.top + int(0.10 * window_scale))))
+
+        row_index = -1
+        if 0 <= self.delete_history_position < len(self.recent_word_history):
+            row_index = self.recent_word_history[self.delete_history_position] - starting_cap
+        if 0 <= row_index < self.n_words:
+            pair_text = f"{self.l1[row_index]}  →  {self.l2[row_index]}"
+            pair_font_size = max(16, int(0.18 * window_scale))
+            pair_font = pygame.font.SysFont("calibri", pair_font_size)
+            while pair_font.size(pair_text)[0] > panel.width - int(0.32 * window_scale) and pair_font_size > 16:
+                pair_font_size -= 2
+                pair_font = pygame.font.SysFont("calibri", pair_font_size)
+            pair_surface = pair_font.render(pair_text, True, self.BLUE)
+            self.screen.blit(pair_surface, pair_surface.get_rect(center=(panel.centerx, panel.top + int(0.68 * window_scale))))
+
+            history_text = f"{self.delete_history_position + 1} / {len(self.recent_word_history)}"
+            history_surface = self.gaussian_font.render(history_text, True, self.TEXT)
+            self.screen.blit(history_surface, history_surface.get_rect(center=(panel.centerx, panel.top + int(0.91 * window_scale))))
+        else:
+            no_word_surface = self.gaussian_font.render(
+                self.get_ui_text("No recent word available", "Kein zuletzt aufgerufenes Wort"),
+                True,
+                self.TEXT,
+            )
+            self.screen.blit(
+                no_word_surface,
+                no_word_surface.get_rect(center=(panel.centerx, panel.top + int(0.76 * window_scale))),
+            )
+
+        if self.delete_confirmation_error:
+            error_surface = self.gaussian_font.render(self.delete_confirmation_error, True, self.RED)
+            self.screen.blit(error_surface, error_surface.get_rect(center=(panel.centerx, panel.top + int(1.11 * window_scale))))
+
+        mouse_pos = pygame.mouse.get_pos()
+        button_font = self.gaussian_font
+        self.draw_button(
+            self.delete_confirm_button,
+            self.delete_confirm_button.collidepoint(mouse_pos),
+            False,
+            label=self.get_ui_text("Delete", "Löschen"),
+            font=button_font,
+            label_color="#FFFFFF",
+        )
+        self.draw_button(
+            self.delete_cancel_button,
+            self.delete_cancel_button.collidepoint(mouse_pos),
+            False,
+            label=self.get_ui_text("Cancel", "Abbrechen"),
+            font=button_font,
+            label_color="#FFFFFF",
+        )
 
 
     def delete_selected_manager_row(self):
@@ -1106,12 +1476,8 @@ class SRS:
         self.manager_input = ""
         self.manager_input_changed = False
         self.refresh_manager_rows()
-        self.manager_scroll = max(
-            0,
-            min(
-                insert_at - self.manager_visible_rows() + 1,
-                len(self.manager_rows) - self.manager_visible_rows(),
-            ),
+        self.set_manager_scroll_target(
+            max(0, insert_at - self.manager_visible_rows() + 1) * self.manager_row_height
         )
         self.manager_message = self.get_ui_text("Row added", "Zeile hinzugefuegt")
 
@@ -1130,6 +1496,9 @@ class SRS:
         self.reload_manager_set_if_active(selected_set)
         self.manager_edit_row = None
         self.manager_edit_column = None
+        self.manager_scroll_fraction = 0.0
+        self.manager_scroll_offset = 0.0
+        self.manager_scroll_target = 0.0
         self.manager_input = ""
         self.manager_input_changed = False
         self.refresh_manager_rows()
@@ -1158,16 +1527,24 @@ class SRS:
     def manager_row_at(self, mouse_pos):
         if not self.manager_table_rect.collidepoint(mouse_pos):
             return None
-        row = self.manager_scroll + (mouse_pos[1] - self.manager_table_rect.top) // self.manager_row_height
+        if mouse_pos[0] >= self.manager_table_rect.right - int(0.09 * window_scale):
+            return None
+        row = int((mouse_pos[1] - self.manager_table_rect.top + self.manager_scroll_offset) // self.manager_row_height)
         return row if 0 <= row < len(self.manager_rows) else None
 
 
+    def set_manager_scroll_target(self, offset):
+        max_scroll = max(0, len(self.manager_rows) * self.manager_row_height - self.manager_table_rect.height)
+        self.manager_scroll_target = min(max(0.0, offset), float(max_scroll))
+
+
     def manager_scroll_to_row(self, row_index):
-        visible_rows = self.manager_visible_rows()
-        if row_index < self.manager_scroll:
-            self.manager_scroll = row_index
-        elif row_index >= self.manager_scroll + visible_rows:
-            self.manager_scroll = row_index - visible_rows + 1
+        row_top = row_index * self.manager_row_height
+        row_bottom = row_top + self.manager_row_height
+        if row_top < self.manager_scroll_target:
+            self.set_manager_scroll_target(row_top)
+        elif row_bottom > self.manager_scroll_target + self.manager_table_rect.height:
+            self.set_manager_scroll_target(row_bottom - self.manager_table_rect.height)
 
 
     def manager_selected_set(self):
@@ -1267,7 +1644,8 @@ class SRS:
         manager_rows = list(zip(*self.read_full_set(selected_set)[:2]))
         self.create_manager_editor_backup(selected_set)
         self.manager_rows = manager_rows
-        self.manager_scroll = 0
+        self.manager_scroll_offset = 0.0
+        self.manager_scroll_target = 0.0
         self.manager_mode = "editor"
         self.manager_message = ""
 
@@ -1349,7 +1727,7 @@ class SRS:
         selected_set = self.manager_selected_set()
         if selected_set is not None:
             self.manager_rows = list(zip(*self.read_full_set(selected_set)[:2]))
-        self.manager_scroll = min(self.manager_scroll, max(0, len(self.manager_rows) - self.manager_visible_rows()))
+        self.set_manager_scroll_target(self.manager_scroll_target)
         self.update_manager_search_matches()
 
 
@@ -1419,6 +1797,8 @@ class SRS:
         self.init_data()
         self.current_index = -1
         self.last_index = -1
+        self.recent_word_history = []
+        self.delete_confirmation_open = False
 
 
     def reload_manager_set_if_active(self, folder):
@@ -1545,6 +1925,7 @@ class SRS:
         self.init_data()
         self.current_index = -1
         self.last_index = -1
+        self.recent_word_history = []
         self.trigger_pause()
 
 
@@ -1587,24 +1968,26 @@ class SRS:
 
     def draw(self):
         self.finish_timer_if_expired()
+        self.save_app_usage()
+
+        if not self.settings_clicked and self.timer_running:
+            if self.ticks == 0:
+                self.timer_running = False
+                self.TEXT = self.LIGHT
+                self.input_text = ""
+                self.get_new_index()
+            else:
+                self.ticks -= 1
+                self.input_text = self.target[self.current_index]
+
+        if self.stats_open:
+            self.draw_stats()
+            return
 
         if self.manager_mode is not None:
             self.draw_manager()
-            if self.settings_timer_state == "ended":
-                self.draw_timer_stats_overlay()
             return
-        explored_rect = None
         if not self.settings_clicked:
-            if self.timer_running:
-                if self.ticks == 0:
-                    self.timer_running = False
-                    self.TEXT = self.LIGHT
-                    self.input_text = ""
-                    self.get_new_index()
-                else:
-                    self.ticks -= 1
-                    self.input_text = self.target[self.current_index]
-                
             # decide what to display
             if self.editing_step == 1:
                 display_word = f"{self.get_ui_text('Edit source', 'Quelle bearbeiten')}: {self.last_source_word}"
@@ -1641,7 +2024,7 @@ class SRS:
             self.draw_grid(self.coordinate_system_rect, self.n_words,  self.GRID_COLOR)
 
             #draw current selected curve
-            self.draw_gaussian_curve(self.screen, self.coordinate_system_rect, focused_area, sigma_factor, min_gauss_weights, self.COORDINATE_SYSTEM_GRAPH)
+            self.draw_gaussian_curve(self.screen, self.coordinate_system_rect, focused_area, sigma_factor, min_gauss_weights, self.GAUSS)
 
             #settings for gaussian distribution
             pygame.draw.rect(self.screen, self.COORDINATE_SYSTEM, self.coordinate_system_rect, self.coordinate_system_line_thickness, 0)
@@ -1663,13 +2046,13 @@ class SRS:
                         if self.mouse_hold and delta_start_time > 0.2:
                             y_axis = ((rect_down - y) / (rect_down - rect_up))
                             # draw curve based on selected values
-                            self.draw_gaussian_curve(self.screen, self.coordinate_system_rect, focused_area_local, self.selected_sigma_factor, y_axis, self.RED)
+                            self.draw_gaussian_curve(self.screen, self.coordinate_system_rect, focused_area_local, self.selected_sigma_factor, y_axis, self.GAUSS_NEW)
                             self.selected_min_gauss_weights = round(y_axis, 1) # round tenth
                             self.selected_focused_area = focused_area_local
                         else:
                             y_axis = (sigma_factor_min + (((rect_down - y) / (rect_down - rect_up))**2) * sigma_factor_range)
                             # draw curve based on selected values
-                            self.draw_gaussian_curve(self.screen, self.coordinate_system_rect, focused_area_local, y_axis, self.selected_min_gauss_weights , self.RED)
+                            self.draw_gaussian_curve(self.screen, self.coordinate_system_rect, focused_area_local, y_axis, self.selected_min_gauss_weights , self.GAUSS_NEW)
                             self.selected_sigma_factor = y_axis
                             self.selected_focused_area = focused_area_local
 
@@ -1696,14 +2079,14 @@ class SRS:
         #* draw buttons
         # open settings
         settings_button_alpha = 255
-        if not self.settings_clicked and self.settings_timer_state in ("running", "paused", "ended"):
+        if not self.settings_clicked and self.settings_timer_state in ("running", "paused"):
             settings_button_alpha = self.get_timer_visibility_alpha(self.settings_button, self.get_remaining_timer_seconds(), y_scale=1)
         self.draw_button(self.settings_button, self.settings_button_hover, self.settings_clicked, image="settings_button.png", alpha=settings_button_alpha)
 
         if not self.settings_clicked and self.last_index != -1:
             # edit prev word
             edit_button_alpha = 255
-            if self.settings_timer_state in ("running", "paused", "ended"):
+            if self.settings_timer_state in ("running", "paused"):
                 edit_button_alpha = self.get_timer_visibility_alpha(self.edit_button, self.get_remaining_timer_seconds(), y_scale=1)
             self.draw_button(self.edit_button, self.edit_button_hover, False, image="edit_button.png", alpha=edit_button_alpha)
         elif self.settings_clicked:
@@ -1722,23 +2105,11 @@ class SRS:
             self.draw_button(self.folder_button,  self.folder_button_hover, False, image="folder_button.png")
             self.draw_button(self.language_button, self.language_button_hover, False, label=self.ui_language.upper(), font=self.language_font, label_color="#FFFFFF")
 
-        explored_count = int(np.count_nonzero(self.df.iloc[:, 3] != 0)) if not self.df.empty else 0
+        if self.settings_clicked or self.stats_open:
+            self.draw_stats_button()
 
         #* draw sliders
         if self.settings_clicked:
-            explored_percent = round(100 * explored_count / self.n_words) if self.n_words else 0
-            explored_label = self.get_ui_text("Explored", "Erkundet") + f": {explored_percent}%"
-            label_padding = int(0.06 * window_scale)
-            label_max_width = max(1, self.WIDTH - 2 * label_padding)
-            label_font_size = self.gaussian_font.get_height()
-            explored_surface = self.gaussian_font.render(explored_label, True, self.TEXT)
-            while explored_surface.get_width() > label_max_width and label_font_size > 1:
-                label_font_size -= 1
-                label_font = pygame.font.SysFont("calibri", label_font_size)
-                explored_surface = label_font.render(explored_label, True, self.TEXT)
-            explored_rect = explored_surface.get_rect(bottomright=(self.WIDTH - label_padding, self.HEIGHT - label_padding))
-            self.screen.blit(explored_surface, explored_rect)
-
             is_timer_active = self.settings_timer_state in ("running", "paused")
             timer_label = "            " if is_timer_active else self.get_ui_text("Set timer", "Timer einstellen")
             self.draw_slider(
@@ -1777,28 +2148,28 @@ class SRS:
             )
             self.draw_exploration_slider()
             self.draw_timer_slider()
-            cancel_border_color = self.TIMER_STOP_BORDER if is_timer_active else self.COORDINATE_SYSTEM
+            cancel_border_color = self.TIMER_STOP_BORDER if is_timer_active else self.TIMER
             self.draw_button(self.cancel_button, self.cancel_button_hover, False, image="stop_button.png", border=True, border_color=cancel_border_color, img_scale=1)
             if self.settings_timer_state == "running":
                 button_image = "pause_button.png"
-                start_border_color = self.BLUE
+                start_border_color = self.TIMER
             else:
                 button_image = "start_button.png"
-                start_border_color = self.TIMER_START_BORDER
+                start_border_color = self.TIMER
             self.draw_button(self.start_button, self.start_button_hover, False, image=button_image, border=True, border_color=start_border_color, img_scale=1)
 
         #* draw hovering messages after:
         hovered_tooltip = None
         slider_tooltip = None
-        if self.settings_button_hover:
+        if (self.settings_clicked or self.stats_open) and self.stats_button_hover:
+            hovered_tooltip = self.get_button_tooltip("stats")
+        elif self.settings_button_hover:
             hovered_tooltip = self.get_button_tooltip("settings")
         elif self.settings_clicked:
             if self.help_button_hover:
                 hovered_tooltip = self.get_button_tooltip("help")
             elif self.language_button_hover:
                 hovered_tooltip = self.get_button_tooltip("language")
-            elif explored_rect is not None and explored_rect.collidepoint(pygame.mouse.get_pos()):
-                slider_tooltip = f"{explored_count}/{self.n_words}"
             elif self.cancel_button_hover:
                 hovered_tooltip = self.get_ui_text("Cancel timer", "Timer abbrechen")
             elif self.start_button_hover:
@@ -1879,9 +2250,8 @@ class SRS:
 
         if self.shortcuts_visible:
             self.draw_shortcut_overlay()
-        if self.settings_timer_state == "ended":
-            self.draw_timer_stats_overlay()
-
+        if self.delete_confirmation_open:
+            self.draw_delete_confirmation()
 
     def draw_button(self, rect, hover, pressed, image=None, label=None, border=False, border_color=None, img_scale=button_img_scale, font=None, label_color=None, alpha=255, normal_color=None, hover_color=None):
         if pressed:
@@ -1914,6 +2284,17 @@ class SRS:
             button_surface.blit(label_surface, label_rect)
         button_surface.set_alpha(alpha)
         self.screen.blit(button_surface, rect)
+
+
+    def draw_stats_button(self):
+        self.draw_button(self.stats_button, self.stats_button_hover, self.stats_open, image="stats_button.png")
+
+
+    def toggle_stats(self):
+        self.stats_open = not self.stats_open
+        if self.stats_open:
+            self.stats_scroll_right = 0.0
+            self.stats_scroll_right_target = 0.0
 
 
     def draw_exploration_slider(self):
@@ -2038,7 +2419,7 @@ class SRS:
                 message_y = self.manager_rect.bottom - 8 - self.gaussian_font.get_height() // 2
             else:
                 message_y = button_y - self.gaussian_font.get_height() // 2
-            self.draw_manager_message(self.manager_message, message_y)
+            self.draw_manager_message(self.manager_message, message_y - 20)
 
 
     def draw_manager_editor(self):
@@ -2091,9 +2472,12 @@ class SRS:
         result_surface = self.gaussian_font.render(result_text, True, self.TEXT)
         self.screen.blit(result_surface, result_surface.get_rect(midleft=(self.manager_search_next_rect.right + 8, self.manager_search_rect.centery)))
 
-        pygame.draw.rect(self.screen, self.GRID_COLOR, self.manager_table_rect, width=1)
+        self.manager_scroll_offset += (self.manager_scroll_target - self.manager_scroll_offset) * 0.24
+        if abs(self.manager_scroll_target - self.manager_scroll_offset) < 0.5:
+            self.manager_scroll_offset = self.manager_scroll_target
+        content_right = self.manager_table_rect.right - int(0.12 * window_scale)
         column_x = self.manager_table_rect.left + self.manager_index_width
-        split_x = self.manager_table_rect.centerx
+        split_x = self.manager_table_rect.left + (content_right - self.manager_table_rect.left) // 2
         source_header = self.gaussian_font.render(self.get_ui_text("Source", "Quelle"), True, self.TEXT)
         target_header = self.gaussian_font.render(self.get_ui_text("Target", "Ziel"), True, self.TEXT)
         self.screen.blit(source_header, (column_x, self.manager_table_rect.top - 21))
@@ -2106,18 +2490,24 @@ class SRS:
         matching_columns_by_row = {}
         for match_row, column in self.manager_search_matches:
             matching_columns_by_row.setdefault(match_row, set()).add(column)
-        for screen_row, row_index in enumerate(range(self.manager_scroll, min(len(self.manager_rows), self.manager_scroll + self.manager_visible_rows()))):
-            row_rect = pygame.Rect(self.manager_table_rect.left, self.manager_table_rect.top + screen_row * self.manager_row_height, self.manager_table_rect.width, self.manager_row_height)
+        first_row = max(0, int(self.manager_scroll_offset // self.manager_row_height))
+        last_row = min(
+            len(self.manager_rows),
+            int(math.ceil((self.manager_scroll_offset + self.manager_table_rect.height) / self.manager_row_height)),
+        )
+        old_clip = self.screen.get_clip()
+        self.screen.set_clip(self.manager_table_rect)
+        for row_index in range(first_row, last_row):
+            row_y = self.manager_table_rect.top + row_index * self.manager_row_height - round(self.manager_scroll_offset)
+            row_rect = pygame.Rect(self.manager_table_rect.left, row_y, content_right - self.manager_table_rect.left, self.manager_row_height)
             matching_columns = matching_columns_by_row.get(row_index, set())
             if matching_columns:
                 pygame.draw.rect(self.screen, "#174F55", row_rect)
             if current_match is not None and current_match[0] == row_index:
                 pygame.draw.rect(self.screen, "#23777B", row_rect)
-            pygame.draw.line(self.screen, self.GRID_COLOR, row_rect.bottomleft, row_rect.bottomright)
-            pygame.draw.line(self.screen, self.GRID_COLOR, (split_x, row_rect.top), (split_x, row_rect.bottom))
             index_surface = self.gaussian_font.render(str(row_index + 1), True, self.BLUE)
             self.screen.blit(index_surface, index_surface.get_rect(midleft=(row_rect.left + 12, row_rect.centery + 3)))
-            for column, x, right in ((0, column_x, split_x - 6), (1, split_x + 6, self.manager_table_rect.right - 6)):
+            for column, x, right in ((0, column_x, split_x - 6), (1, split_x + 6, content_right)):
                 if column in matching_columns:
                     cell_highlight = "#2F9E99" if current_match == (row_index, column) else "#24736F"
                     pygame.draw.rect(
@@ -2132,10 +2522,16 @@ class SRS:
                     value += "_"
                 value = self.fit_manager_text(value, right - x, keep_end=is_editing)
                 value_surface = self.gaussian_font.render(value, True, self.TEXT)
-                old_clip = self.screen.get_clip()
-                self.screen.set_clip(pygame.Rect(x, row_rect.top, right - x, row_rect.height).clip(old_clip))
+                cell_clip = pygame.Rect(x, row_rect.top, right - x, row_rect.height).clip(self.manager_table_rect).clip(old_clip)
+                self.screen.set_clip(cell_clip)
                 self.screen.blit(value_surface, value_surface.get_rect(midleft=(x, row_rect.centery + 3)))
-                self.screen.set_clip(old_clip)
+                self.screen.set_clip(self.manager_table_rect)
+        self.screen.set_clip(old_clip)
+        self.draw_scrollbar(
+            self.manager_table_rect,
+            len(self.manager_rows) * self.manager_row_height,
+            self.manager_scroll_offset,
+        )
         self.draw_button(
             self.manager_delete_row_button,
             self.manager_delete_row_button.collidepoint(mouse_pos),
@@ -2199,7 +2595,7 @@ class SRS:
         self.screen.blit(title_surface, title_surface.get_rect(midtop=(panel.centerx, panel.top + int(0.12 * window_scale))))
 
         shortcut_groups = [
-            (self.get_ui_text("General", "Allgemein"), [("Ctrl + G", self.get_ui_text("Open settings", "Einstellungen öffnen")), ("Ctrl + E", self.get_ui_text("Edit previous word", "Vorheriges Wort bearbeiten")), ("Ctrl + F", self.get_ui_text("Open dataset manager / search words", "Datensatzverwaltung öffnen / Wörter suchen")), ("Ctrl + D", self.get_ui_text("Delete recent word from dataset", "Letztes Wort löschen"))]),
+            (self.get_ui_text("General", "Allgemein"), [("Ctrl + S", self.get_ui_text("Toggle statistics", "Statistiken umschalten")), ("Ctrl + D", self.get_ui_text("Delete last word", "Letztes Wort löschen")), ("Ctrl + G", self.get_ui_text("Open settings", "Einstellungen öffnen")), ("Ctrl + E", self.get_ui_text("Edit previous word", "Vorheriges Wort bearbeiten")), ("Ctrl + F", self.get_ui_text("Open dataset manager", "Datensatzverwaltung öffnen"))]),
             (self.get_ui_text("Toggle settings", "Einstellungen"), [("Ctrl + L", self.get_ui_text("Toggle word order", "Wortreihenfolge umschalten")), ("Ctrl + T", self.get_ui_text("Toggle Gaussian weights", "Gauß-Gewichte umschalten"))]),
         ]
         row_height = max(20, int(0.12 * window_scale))
@@ -2420,7 +2816,7 @@ class SRS:
             hover_alpha = int(255 * (1.0 - (dist - inner_radius) / (outer_radius - inner_radius)))
 
         reveal_age = time.time() - self.timer_reveal_started_at
-        if self.settings_timer_state == "ended" or remaining <= 10:
+        if remaining <= 10:
             alert_alpha = 255
         elif reveal_age <= 1.5:
             alert_alpha = 255
@@ -2458,6 +2854,7 @@ class SRS:
             self.tooltip_mouse_pos = mouse_pos
             self.tooltip_stationary_ms = 0
         self.settings_button_hover = self.settings_button.collidepoint(mouse_pos)
+        self.stats_button_hover = self.stats_button.collidepoint(mouse_pos)
         self.folder_button_hover = self.folder_button.collidepoint(mouse_pos)
         self.translation_mode_button_hover = self.translation_mode_button.collidepoint(mouse_pos)
         self.edit_button_hover = self.edit_button.collidepoint(mouse_pos)
@@ -2477,12 +2874,80 @@ class SRS:
         self.finish_timer_if_expired()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                self.save_app_usage(force=True)
                 pygame.quit()
                 sys.exit()
 
-            if self.settings_timer_state == "ended" and event.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
-                self.stop_timer()
-                self.trigger_pause()
+            if event.type == pygame.KEYDOWN and event.key in (pygame.K_LCTRL, pygame.K_RCTRL):
+                self.ctrl_hold = True
+                continue
+            elif event.type == pygame.KEYUP and event.key in (pygame.K_LCTRL, pygame.K_RCTRL):
+                self.ctrl_hold = False
+                continue
+
+            if self.delete_confirmation_open:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        self.delete_confirmation_open = False
+                        self.delete_confirmation_error = ""
+                    elif event.key in (pygame.K_LEFT, pygame.K_UP):
+                        self.delete_history_position = max(0, self.delete_history_position - 1)
+                        self.delete_confirmation_error = ""
+                    elif event.key in (pygame.K_RIGHT, pygame.K_DOWN):
+                        self.delete_history_position = min(
+                            len(self.recent_word_history) - 1,
+                            self.delete_history_position + 1,
+                        )
+                        self.delete_confirmation_error = ""
+                    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        self.confirm_delete_recent_word()
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if self.delete_confirm_button.collidepoint(mouse_pos):
+                        self.confirm_delete_recent_word()
+                    elif self.delete_cancel_button.collidepoint(mouse_pos):
+                        self.delete_confirmation_open = False
+                        self.delete_confirmation_error = ""
+                continue
+
+            if (
+                event.type == pygame.KEYDOWN
+                and event.key == pygame.K_s
+                and (getattr(event, "mod", 0) & pygame.KMOD_CTRL or self.ctrl_hold)
+            ):
+                self.toggle_stats()
+                continue
+
+            if self.stats_open:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        self.stats_open = False
+                elif event.type == pygame.MOUSEWHEEL:
+                    scroll_step = max(48, int(0.28 * window_scale))
+                    if self.stats_right_viewport.collidepoint(mouse_pos):
+                        self.stats_scroll_right_target -= event.y * scroll_step
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if self.stats_button.collidepoint(mouse_pos):
+                        self.toggle_stats()
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
+                    scroll_step = max(48, int(0.28 * window_scale))
+                    scroll_delta = scroll_step if event.button == 4 else -scroll_step
+                    if self.stats_right_viewport.collidepoint(mouse_pos):
+                        self.stats_scroll_right_target -= scroll_delta
+                continue
+
+            if (
+                event.type == pygame.KEYDOWN
+                and event.key == pygame.K_d
+                and (getattr(event, "mod", 0) & pygame.KMOD_CTRL or self.ctrl_hold)
+            ):
+                if (
+                    not self.settings_clicked
+                    and self.manager_mode is None
+                    and not self.shortcuts_visible
+                    and not self.editing_step
+                    and not self.timer_running
+                ):
+                    self.open_delete_confirmation()
                 continue
 
             if self.manager_mode is not None:
@@ -2504,10 +2969,7 @@ class SRS:
                     if self.handle_word_cap_key(event.key):
                         continue
 
-                if event.key == pygame.K_LCTRL:
-                    self.ctrl_hold = True
-
-                elif self.ctrl_hold:
+                if self.ctrl_hold:
                     if event.key == pygame.K_f:
                         self.trigger_folder_button()
                     elif event.key == pygame.K_g:
@@ -2517,12 +2979,6 @@ class SRS:
                         continue
                     elif event.key == pygame.K_l:
                         self.trigger_loop_button()
-                    elif event.key == pygame.K_d:
-                        if self.last_index != -1:
-                            deleted_word = self.delete_row(self.last_index)
-                            self.last_index = -1
-                            if deleted_word is not None:
-                                print(f"..deleted word {deleted_word}..")
                     elif event.key == pygame.K_t:
                         self.trigger_gaussian_button()
                     elif event.key == pygame.K_BACKSPACE:
@@ -2571,7 +3027,9 @@ class SRS:
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 self.mouse_hold = True
-                if self.help_button_hover:
+                if event.button == 1 and self.stats_button_hover and self.settings_clicked:
+                    self.toggle_stats()
+                elif self.help_button_hover:
                     self.shortcuts_visible = not self.shortcuts_visible
                 elif self.shortcuts_visible:
                     if not self.shortcut_overlay_rect.collidepoint(mouse_pos):
@@ -2682,10 +3140,6 @@ class SRS:
                         self.save_focused_area(self.selected_focused_area)
                         self.get_new_gaussian = False
 
-            elif event.type == pygame.KEYUP:
-                if event.key == pygame.K_LCTRL:
-                    self.ctrl_hold = False
-
         if self.exploration_slider_active:
             self.exploration_factor = self.update_slider(
                 self.exploration_slider_rect,
@@ -2709,15 +3163,31 @@ class SRS:
         if self.manager_tab_held and self.manager_mode == "editor" and self.manager_edit_row is not None:
             self.update_manager_tab_hold()
 
-        if not found_keydown and not mouse_moved and not self.editing_step:
+        if not self.stats_open and not found_keydown and not mouse_moved and not self.editing_step:
             self.inactive_ticks += 1
         if self.inactive_ticks > max_inactive_ticks and not self.pause_triggered:
             self.trigger_pause()
 
 
     def handle_manager_event(self, event, mouse_pos):
-        if event.type == pygame.MOUSEWHEEL and self.manager_mode == "editor":
-            self.manager_scroll = max(0, min(max(0, len(self.manager_rows) - self.manager_visible_rows()), self.manager_scroll - event.y))
+        if (
+            event.type == pygame.MOUSEWHEEL
+            and self.manager_mode == "editor"
+            and self.manager_table_rect.collidepoint(mouse_pos)
+        ):
+            scroll_step = max(48, int(0.28 * window_scale))
+            self.set_manager_scroll_target(self.manager_scroll_target - event.y * scroll_step)
+            return
+
+        if (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button in (4, 5)
+            and self.manager_mode == "editor"
+            and self.manager_table_rect.collidepoint(mouse_pos)
+        ):
+            scroll_step = max(48, int(0.28 * window_scale))
+            direction = 1 if event.button == 4 else -1
+            self.set_manager_scroll_target(self.manager_scroll_target - direction * scroll_step)
             return
 
         if event.type == pygame.KEYUP and event.key == pygame.K_TAB:
@@ -2846,9 +3316,9 @@ class SRS:
                         self.manager_input = self.append_input_character(self.manager_input, event.unicode)
                         self.manager_input_changed = True
                 elif event.key == pygame.K_UP:
-                    self.manager_scroll = max(0, self.manager_scroll - 1)
+                    self.set_manager_scroll_target(self.manager_scroll_target - self.manager_row_height)
                 elif event.key == pygame.K_DOWN:
-                    self.manager_scroll = min(max(0, len(self.manager_rows) - self.manager_visible_rows()), self.manager_scroll + 1)
+                    self.set_manager_scroll_target(self.manager_scroll_target + self.manager_row_height)
                 return
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -2917,7 +3387,9 @@ class SRS:
             if row is not None:
                 self.commit_manager_cell()
                 self.manager_edit_row = row
-                self.manager_edit_column = 0 if mouse_pos[0] < self.manager_table_rect.centerx else 1
+                content_width = self.manager_table_rect.width - int(0.12 * window_scale)
+                split_x = self.manager_table_rect.left + content_width // 2
+                self.manager_edit_column = 0 if mouse_pos[0] < split_x else 1
                 self.manager_input = self.manager_rows[row][self.manager_edit_column]
                 self.manager_input_changed = False
                 self.manager_drag_row = row
@@ -2943,6 +3415,7 @@ class SRS:
 
         can_pause = (
             not self.settings_clicked
+            and not self.stats_open
             and self.manager_mode is None
             and not self.editing_step
             and not self.timer_running
@@ -2997,6 +3470,12 @@ class SRS:
         button_top = button_gap
         button_step = button_height + button_gap
         self.settings_button = pygame.Rect(button_left, button_top, button_width, button_height)
+        self.stats_button = pygame.Rect(
+            self.WIDTH - button_gap - button_width,
+            button_top,
+            button_width,
+            button_height,
+        )
         self.edit_button = pygame.Rect(button_left + button_step, button_top, button_width, button_height)
         self.gaussian_button = pygame.Rect(button_left, button_top + button_step, button_width, button_height)
         self.loop_button = pygame.Rect(button_left, button_top + 2 * button_step, button_width, button_height)
@@ -3074,6 +3553,31 @@ class SRS:
             int(2.8 * window_scale),
             int(1.9 * window_scale),
         )
+        delete_panel_width = min(int(0.82 * self.WIDTH), int(4.6 * window_scale))
+        delete_panel_height = min(int(0.8 * self.HEIGHT), int(1.55 * window_scale))
+        self.delete_confirmation_rect = pygame.Rect(
+            (self.WIDTH - delete_panel_width) // 2,
+            (self.HEIGHT - delete_panel_height) // 2,
+            delete_panel_width,
+            delete_panel_height,
+        )
+        delete_button_width = max(110, int(0.78 * window_scale))
+        delete_button_height = max(36, int(0.25 * window_scale))
+        delete_button_gap = int(0.08 * window_scale)
+        buttons_left = self.WIDTH // 2 - delete_button_width - delete_button_gap // 2
+        delete_button_top = self.delete_confirmation_rect.bottom - delete_button_height - int(0.12 * window_scale)
+        self.delete_confirm_button = pygame.Rect(
+            buttons_left,
+            delete_button_top,
+            delete_button_width,
+            delete_button_height,
+        )
+        self.delete_cancel_button = pygame.Rect(
+            self.WIDTH // 2 + delete_button_gap // 2,
+            delete_button_top,
+            delete_button_width,
+            delete_button_height,
+        )
         self.manager_rect = pygame.Rect(int(0.4 * window_scale), int(0.25 * window_scale), self.WIDTH - int(0.8 * window_scale), self.HEIGHT - int(0.5 * window_scale))
         self.manager_list_rect = pygame.Rect(self.manager_rect.left + 20, self.manager_rect.top + 100, self.manager_rect.width // 3 - 50, self.manager_rect.height - 175)
         self.manager_detail_rect = pygame.Rect(self.manager_list_rect.right + 20, self.manager_list_rect.top, self.manager_rect.right - self.manager_list_rect.right - 40, self.manager_list_rect.height)
@@ -3081,7 +3585,7 @@ class SRS:
         self.manager_table_rect = pygame.Rect(self.manager_detail_rect.left, self.manager_detail_rect.top + 125, self.manager_detail_rect.width, self.manager_detail_rect.height - 125)
         self.manager_search_rect = pygame.Rect(
             self.manager_table_rect.left,
-            self.manager_detail_rect.top + 72,
+            self.manager_detail_rect.top + 47,
             int(self.manager_table_rect.width * 0.58),
             max(26, int(0.15 * window_scale)),
         )
@@ -3137,11 +3641,12 @@ class SRS:
         self.BUTTON_CLICKED_HOVER = "#9094EC"  # clicked + hover
         self.BUTTON_TEXT = "#130C1D"
         self.COORDINATE_SYSTEM = "#1D3873"
-        self.COORDINATE_SYSTEM_GRAPH = "#0DE5F0"
         self.SLIDER_HANDLE = "#7A7DBB"
         self.GRID_COLOR = "#14264F"
-        self.TIMER_START_BORDER = "#28734B"
-        self.TIMER_STOP_BORDER = "#8A3B3B"
+        self.TIMER_STOP_BORDER = "#713B8A"
+        self.TIMER ="#1D3873"
+        self.GAUSS = "#C0C3F6"
+        self.GAUSS_NEW = "#2F3575"
 
         # tooltip settings
         self.active_tooltip_text = None
@@ -3158,12 +3663,13 @@ class SRS:
         self.coordinate_system_line_thickness = 2
         self.button_tooltips = {
             "settings": ("Open/Close settings", "Einstellungen öffnen/schließen"),
+            "stats": ("Show statistics", "Statistiken anzeigen"),
             "help": ("Show keyboard shortcuts", "Tastenkürzel anzeigen"),
             "language": ("Switch interface language", "Oberflächensprache wechseln"),
             "loop": ("Ignore AI and loop through all words in order", "KI ignorieren und Wörter der Reihe nach lernen"),
             "gaussian": ("Let selected gaussian curve affect AI", "Gewählte Gaußkurve für die KI verwenden"),
             "edit": ("Edit last word", "Letztes Wort bearbeiten"),
-            "folder": ("Change dataset", "Datensatz wechseln"),
+            "folder": ("Open dataset manager", "Datensatzverwaltung öffnen"),
             "translation_mode": ("Switch translation direction: normal / mixed / reverse", "Übersetzungsrichtung wechseln: normal / gemischt / umgekehrt"),
             "start": ("Start a timer", "Timer starten"),
         }
