@@ -10,13 +10,13 @@ import math
 import sys
 import os
 import random
+import unicodedata
 from datetime import datetime
 
 #after
 # TODO map out layers and document
 # TODO linux downloadable
 # TODO test on windows/ upgrade bat files
-# TODO timer ended -> stats
 
 # TODO change gaussian range
 # TODO learning readiness / use data to predict learn span
@@ -28,6 +28,7 @@ from datetime import datetime
 # TODO take l1 l2 avrg. oder das schlechtere?
 # TODO suchfunktion set manager
 # TODO test exploration factor change
+
 
 
 # parameters for dev
@@ -172,6 +173,9 @@ class SRS:
         self.settings_timer_end_time = 0.0
         self.settings_timer_duration = 0.0
         self.settings_timer_ended_at = 0.0
+        self.settings_timer_answered = 0
+        self.settings_timer_correct = 0
+        self.settings_timer_words = set()
         self.timer_reveal_started_at = 0.0
         self.timer_halfway_announced = False
         self.timer_one_minute_announced = False
@@ -260,12 +264,13 @@ class SRS:
 
 
     def filter(self, word):
+        word = unicodedata.normalize("NFC", str(word))
         # replace all characters on list with space
         for c in ignore_characters:
             word = word.replace(c, " ")
 
         # replace every listed short form with its matching translation
-        words = str(word).lower().split()
+        words = word.lower().split()
         short_form_translations = {
             form: translation
             for forms, translation in zip(short_form_list, short_form_translation)
@@ -291,7 +296,6 @@ class SRS:
             weights.append(val)
         return weights
 
-    
 
     def get_ema(self, old_ema, accuracy):
         return ema_alpha*accuracy + (1-ema_alpha)*old_ema
@@ -327,6 +331,7 @@ class SRS:
             masked_vals = np.where(candidate_mask, self.word_vals, 0.0)
             if masked_vals.sum() <= 0:
                 masked_vals = candidate_mask.astype(float)
+            # get index from probability
             self.current_index = self.get_random_from_probability(self.get_probablity(masked_vals))
 
             if self.pause_triggered:
@@ -387,7 +392,6 @@ class SRS:
         return int(np.searchsorted(np.cumsum(probability), np.random.random(), side="right"))
 
 
-
     def get_scaled_time(self):
         return self.scale_time(time.time())
     
@@ -434,8 +438,20 @@ class SRS:
         if input == ["idk"]:
             return False
         
-        distances = [min([self.word_distance(input_word, word) for word in target_word]) for input_word in input]
-        correct = all(input[i] in target_word if len(input[i]) <= 4 else distances[i] <= 1 for i in range(len(input))) and min_input_len <= input_len
+        diacritic_mismatch = any(
+            self.has_diacritic_mismatch(input_word, word)
+            for input_word in input
+            for word in target_word
+        )
+        distances = [
+            min((self.word_distance(input_word, word) for word in target_word), default=math.inf)
+            for input_word in input
+        ]
+        correct = (
+            not diacritic_mismatch
+            and all(input[i] in target_word if len(input[i]) <= 4 else distances[i] <= 1 for i in range(len(input)))
+            and min_input_len <= input_len
+        )
 
         if print_validation:
             self.print_validation_reason(input, target_word, min_input_len, input_len, distances)
@@ -623,6 +639,14 @@ class SRS:
         return dp[len1][len2]
 
 
+    def has_diacritic_mismatch(self, word1, word2):
+        decomposed1 = unicodedata.normalize("NFD", word1)
+        decomposed2 = unicodedata.normalize("NFD", word2)
+        base1 = "".join(char for char in decomposed1 if not unicodedata.combining(char))
+        base2 = "".join(char for char in decomposed2 if not unicodedata.combining(char))
+        return base1 == base2 and decomposed1 != decomposed2
+
+
     def append_input_character(self, text, character):
         text += character
         if text.endswith("/n"):
@@ -634,6 +658,10 @@ class SRS:
 
     def check_input(self): 
         correct = self.is_correct()
+        if self.settings_timer_state in ("running", "paused"):
+            self.settings_timer_answered += 1
+            self.settings_timer_correct += int(correct)
+            self.settings_timer_words.add(self.current_index)
         self.increment_index()
 
         if correct == 1:
@@ -661,6 +689,14 @@ class SRS:
             return max(0, int(min_timer * 60))
 
 
+    def finish_timer_if_expired(self):
+        if self.settings_timer_state == "running" and self.get_remaining_timer_seconds() <= 0:
+            self.settings_timer_state = "ended"
+            self.settings_timer_ended_at = time.time()
+            self.settings_timer_remaining = 0.0
+            self.settings_timer_end_time = 0.0
+
+
     def get_timer_display_text(self):
         remaining_seconds = self.get_remaining_timer_seconds()
         minutes, seconds = divmod(remaining_seconds, 60)
@@ -674,6 +710,9 @@ class SRS:
             self.settings_timer_remaining = float(min_timer * 60)
             self.settings_timer_duration = self.settings_timer_remaining
             self.settings_timer_end_time = time.time() + self.settings_timer_remaining
+            self.settings_timer_answered = 0
+            self.settings_timer_correct = 0
+            self.settings_timer_words.clear()
             self.timer_halfway_announced = False
             self.timer_one_minute_announced = False
             self.input_text = ""
@@ -722,6 +761,63 @@ class SRS:
         self.timer_reveal_started_at = 0.0
         self.timer_halfway_announced = False
         self.timer_one_minute_announced = False
+
+
+    def draw_timer_stats_overlay(self):
+        backdrop = pygame.Surface((self.WIDTH, self.HEIGHT), pygame.SRCALPHA)
+        backdrop.fill((0, 0, 0, 175))
+        self.screen.blit(backdrop, (0, 0))
+
+        panel = pygame.Rect(
+            int(self.WIDTH * 0.1),
+            int(self.HEIGHT * 0.12),
+            int(self.WIDTH * 0.8),
+            int(self.HEIGHT * 0.76),
+        )
+        pygame.draw.rect(self.screen, "#171A3B", panel, border_radius=int(border_radius_ratio * window_scale))
+        pygame.draw.rect(
+            self.screen,
+            self.COORDINATE_SYSTEM,
+            panel,
+            width=max(1, int(0.012 * window_scale)),
+            border_radius=int(border_radius_ratio * window_scale),
+        )
+
+        title_font = pygame.font.Font(pygame.font.get_default_font(), max(24, int(0.15 * window_scale)))
+        row_font = pygame.font.Font(pygame.font.get_default_font(), max(16, int(0.085 * window_scale)))
+        hint_font = pygame.font.Font(pygame.font.get_default_font(), max(12, int(0.06 * window_scale)))
+        title = title_font.render(self.get_ui_text("Timer finished", "Timer beendet"), True, self.TEXT)
+        self.screen.blit(title, title.get_rect(center=(panel.centerx, panel.top + int(panel.height * 0.18))))
+
+        accuracy = (
+            round(100 * self.settings_timer_correct / self.settings_timer_answered)
+            if self.settings_timer_answered
+            else 0
+        )
+        duration_seconds = round(self.settings_timer_duration)
+        minutes, seconds = divmod(duration_seconds, 60)
+        stats = [
+            (self.get_ui_text("Cards answered", "Beantwortete Karten"), str(self.settings_timer_answered)),
+            (self.get_ui_text("Correct answers", "Richtige Antworten"), str(self.settings_timer_correct)),
+            (self.get_ui_text("Accuracy", "Trefferquote"), f"{accuracy}%"),
+            (self.get_ui_text("Unique words", "Einzigartige Wörter"), str(len(self.settings_timer_words))),
+            (self.get_ui_text("Study time", "Lernzeit"), f"{minutes:02d}:{seconds:02d}"),
+        ]
+        row_height = int(panel.height * 0.11)
+        first_row_y = panel.top + int(panel.height * 0.34)
+        for row, (label, value) in enumerate(stats):
+            y = first_row_y + row * row_height
+            label_surface = row_font.render(label, True, self.TEXT)
+            value_surface = row_font.render(value, True, self.BLUE)
+            self.screen.blit(label_surface, label_surface.get_rect(midleft=(panel.left + int(panel.width * 0.1), y)))
+            self.screen.blit(value_surface, value_surface.get_rect(midright=(panel.right - int(panel.width * 0.1), y)))
+
+        hint = hint_font.render(
+            self.get_ui_text("Press any key or click to continue", "Zum Fortfahren Taste drücken oder klicken"),
+            True,
+            self.TEXT,
+        )
+        self.screen.blit(hint, hint.get_rect(center=(panel.centerx, panel.bottom - int(panel.height * 0.1))))
 
 
     def commit_manager_cell(self):
@@ -1268,7 +1364,6 @@ class SRS:
             ) = (enabled,) * 5
 
 
-
     def set_row_val(self, df: pd.DataFrame, col, val):
         df.iloc[:, col] = val
         if not isinstance(col, pd.DataFrame):
@@ -1385,8 +1480,12 @@ class SRS:
 
 
     def draw(self):
+        self.finish_timer_if_expired()
+
         if self.manager_mode is not None:
             self.draw_manager()
+            if self.settings_timer_state == "ended":
+                self.draw_timer_stats_overlay()
             return
         explored_rect = None
         if not self.settings_clicked:
@@ -1517,9 +1616,10 @@ class SRS:
             self.draw_button(self.folder_button,  self.folder_button_hover, False, image="folder_button.png")
             self.draw_button(self.language_button, self.language_button_hover, False, label=self.ui_language.upper(), font=self.language_font, label_color="#FFFFFF")
 
+        explored_count = int(np.count_nonzero(self.df.iloc[:, 3] != 0)) if not self.df.empty else 0
+
         #* draw sliders
         if self.settings_clicked:
-            explored_count = int(np.count_nonzero(self.df.iloc[:, 3] != 0)) if not self.df.empty else 0
             explored_percent = round(100 * explored_count / self.n_words) if self.n_words else 0
             explored_label = self.get_ui_text("Explored", "Erkundet") + f": {explored_percent}%"
             label_padding = int(0.06 * window_scale)
@@ -1592,10 +1692,7 @@ class SRS:
             elif self.language_button_hover:
                 hovered_tooltip = self.get_button_tooltip("language")
             elif explored_rect is not None and explored_rect.collidepoint(pygame.mouse.get_pos()):
-                slider_tooltip = self.get_ui_text(
-                    "Percentage of words explored at least once",
-                    "Anteil der Wörter, die mindestens einmal erkundet wurden",
-                )
+                slider_tooltip = f"{explored_count}/{self.n_words}"
             elif self.cancel_button_hover:
                 hovered_tooltip = self.get_ui_text("Cancel timer", "Timer abbrechen")
             elif self.start_button_hover:
@@ -1649,41 +1746,34 @@ class SRS:
         if self.active_tooltip_text is not None and self.tooltip_alpha > 0:
             self.draw_tooltip(self.active_tooltip_text, self.tooltip_alpha)
 
-        if not self.settings_clicked and self.settings_timer_state in ("running", "paused", "ended"):
+        if not self.settings_clicked and self.settings_timer_state in ("running", "paused"):
             remaining = self.get_remaining_timer_seconds()
-            if remaining <= 0 and self.settings_timer_state == "running":
-                self.settings_timer_state = "ended"
-                self.settings_timer_ended_at = time.time()
-                self.settings_timer_remaining = 0.0
-                self.settings_timer_end_time = 0.0
-            elif self.settings_timer_state == "ended" and time.time() - self.settings_timer_ended_at >= 5.0:
-                self.stop_timer()
+            timer_font = pygame.font.Font(pygame.font.get_default_font(), max(56, int(0.18 * window_scale)))
+            timer_surface = timer_font.render(self.get_timer_display_text(), True, self.TEXT)
+            timer_rect = timer_surface.get_rect(center=(self.WIDTH // 2, self.HEIGHT * 3 // 16))
+            time_outside = time.time() - self.settings_closed_time
+            if time_outside < 1.0:
+                base_alpha = 255
             else:
-                timer_font = pygame.font.Font(pygame.font.get_default_font(), max(56, int(0.18 * window_scale)))
-                timer_text = self.get_ui_text("Timer ended", "Timer beendet") if self.settings_timer_state == "ended" else self.get_timer_display_text()
-                timer_surface = timer_font.render(timer_text, True, self.TEXT)
-                timer_rect = timer_surface.get_rect(center=(self.WIDTH // 2, self.HEIGHT * 3 // 16))
-                time_outside = time.time() - self.settings_closed_time
-                if time_outside < 1.0:
-                    base_alpha = 255
-                else:
-                    fade_time = time_outside - 1.0
-                    base_alpha = max(0, int(255 - fade_time * 200))
+                fade_time = time_outside - 1.0
+                base_alpha = max(0, int(255 - fade_time * 200))
 
-                if self.settings_timer_state == "running" and remaining <= self.settings_timer_duration / 2 and not self.timer_halfway_announced:
-                    self.timer_halfway_announced = True
-                    self.timer_reveal_started_at = time.time()
-                if self.settings_timer_state == "running" and remaining <= 60 and not self.timer_one_minute_announced:
-                    self.timer_one_minute_announced = True
-                    self.timer_reveal_started_at = time.time()
+            if self.settings_timer_state == "running" and remaining <= self.settings_timer_duration / 2 and not self.timer_halfway_announced:
+                self.timer_halfway_announced = True
+                self.timer_reveal_started_at = time.time()
+            if self.settings_timer_state == "running" and remaining <= 60 and not self.timer_one_minute_announced:
+                self.timer_one_minute_announced = True
+                self.timer_reveal_started_at = time.time()
 
-                alpha = self.get_timer_visibility_alpha(timer_rect, remaining, base_alpha)
-                if alpha > 0:
-                    timer_surface.set_alpha(alpha)
-                    self.screen.blit(timer_surface, timer_rect)
+            alpha = self.get_timer_visibility_alpha(timer_rect, remaining, base_alpha)
+            if alpha > 0:
+                timer_surface.set_alpha(alpha)
+                self.screen.blit(timer_surface, timer_rect)
 
         if self.shortcuts_visible:
             self.draw_shortcut_overlay()
+        if self.settings_timer_state == "ended":
+            self.draw_timer_stats_overlay()
 
 
     def draw_button(self, rect, hover, pressed, image=None, label=None, border=False, border_color=None, img_scale=button_img_scale, font=None, label_color=None, alpha=255):
@@ -2182,10 +2272,16 @@ class SRS:
         self.word_cap_slider_hover = self.word_cap_slider_rect.collidepoint(mouse_pos)
         self.coordinate_system_hover = mouse_pos if self.coordinate_system_rect.collidepoint(mouse_pos) else None
 
+        self.finish_timer_if_expired()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 sys.exit()
+
+            if self.settings_timer_state == "ended" and event.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+                self.stop_timer()
+                self.trigger_pause()
+                continue
 
             if self.manager_mode is not None:
                 self.handle_manager_event(event, mouse_pos)
