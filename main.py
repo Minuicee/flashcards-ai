@@ -28,6 +28,7 @@ from datetime import datetime
 # TODO take l1 l2 avrg. oder das schlechtere?
 # TODO suchfunktion set manager
 # TODO test exploration factor change
+#! klammern?
 
 
 
@@ -220,9 +221,16 @@ class SRS:
         self.manager_selected = 0
         self.manager_scroll = 0
         self.manager_input = ""
+        self.manager_search_open = False
+        self.manager_search_focused = False
+        self.manager_search_text = ""
+        self.manager_search_matches = []
+        self.manager_search_index = -1
         self.manager_edit_row = None
         self.manager_edit_column = None
         self.manager_rows = []
+        self.manager_editor_backup_folder = None
+        self.manager_editor_backup_paths = ()
         self.manager_drag_row = None
         self.manager_message = ""
         self.manager_return_to_settings = False
@@ -1256,10 +1264,65 @@ class SRS:
         selected_set = self.manager_selected_set()
         if selected_set is None:
             return
-        self.manager_rows = list(zip(*self.read_full_set(selected_set)[:2]))
+        manager_rows = list(zip(*self.read_full_set(selected_set)[:2]))
+        self.create_manager_editor_backup(selected_set)
+        self.manager_rows = manager_rows
         self.manager_scroll = 0
         self.manager_mode = "editor"
         self.manager_message = ""
+
+
+    def get_manager_editor_backup_paths(self, folder):
+        return tuple(
+            os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.manager-backup")
+            for path in self.get_set_paths(folder)
+        )
+
+
+    def create_manager_editor_backup(self, folder):
+        source_paths = self.get_set_paths(folder)
+        backup_paths = []
+        for source_path, backup_path in zip(source_paths, self.get_manager_editor_backup_paths(folder)):
+            if os.path.exists(source_path):
+                shutil.copy2(source_path, backup_path)
+                backup_paths.append(backup_path)
+            else:
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                backup_paths.append(None)
+        self.manager_editor_backup_folder = folder
+        self.manager_editor_backup_paths = tuple(backup_paths)
+
+
+    def finish_manager_editor(self, save):
+        folder = self.manager_editor_backup_folder
+        if folder is None:
+            self.manager_mode = "sets"
+            return
+
+        if save:
+            self.commit_manager_cell()
+        if not save:
+            for backup_path, target_path in zip(self.manager_editor_backup_paths, self.get_set_paths(folder)):
+                if backup_path is not None:
+                    shutil.copy2(backup_path, target_path)
+                elif os.path.exists(target_path):
+                    os.remove(target_path)
+            self.reload_manager_set_if_active(folder)
+            self.manager_message = self.get_ui_text("Changes discarded", "Änderungen verworfen")
+
+        for backup_path in self.manager_editor_backup_paths:
+            if backup_path is not None:
+                os.remove(backup_path)
+        self.manager_editor_backup_folder = None
+        self.manager_editor_backup_paths = ()
+        self.manager_mode = "sets"
+        self.manager_edit_row = None
+        self.manager_edit_column = None
+        self.manager_input = ""
+        self.manager_input_changed = False
+        self.manager_search_focused = False
+        self.refresh_manager_rows()
 
 
     def read_full_set(self, folder=None):
@@ -1287,6 +1350,49 @@ class SRS:
         if selected_set is not None:
             self.manager_rows = list(zip(*self.read_full_set(selected_set)[:2]))
         self.manager_scroll = min(self.manager_scroll, max(0, len(self.manager_rows) - self.manager_visible_rows()))
+        self.update_manager_search_matches()
+
+
+    def update_manager_search_matches(self):
+        query = self.manager_search_text.casefold().strip()
+        self.manager_search_matches = [
+            (row_index, column)
+            for row_index, row in enumerate(self.manager_rows)
+            for column, value in enumerate(row)
+            if query and query in value.casefold()
+        ]
+        if not self.manager_search_matches:
+            self.manager_search_index = -1
+        elif self.manager_search_index < 0 or self.manager_search_index >= len(self.manager_search_matches):
+            self.manager_search_index = 0
+        if self.manager_search_index >= 0:
+            self.manager_scroll_to_row(self.manager_search_matches[self.manager_search_index][0])
+
+
+    def move_manager_search(self, direction):
+        if not self.manager_search_matches:
+            return
+        self.manager_search_index = (
+            self.manager_search_index + direction
+        ) % len(self.manager_search_matches)
+        self.manager_scroll_to_row(self.manager_search_matches[self.manager_search_index][0])
+
+
+    def set_manager_search_text(self, text):
+        self.manager_search_text = text
+        self.manager_search_index = 0
+        self.update_manager_search_matches()
+
+
+    def open_manager_search(self):
+        self.commit_manager_cell()
+        self.manager_edit_row = None
+        self.manager_edit_column = None
+        self.manager_input = ""
+        self.manager_input_changed = False
+        self.manager_search_open = True
+        self.manager_search_focused = True
+        self.update_manager_search_matches()
 
 
     def refresh_manager_sets(self):
@@ -1746,6 +1852,7 @@ class SRS:
         if self.active_tooltip_text is not None and self.tooltip_alpha > 0:
             self.draw_tooltip(self.active_tooltip_text, self.tooltip_alpha)
 
+        #* draw timer
         if not self.settings_clicked and self.settings_timer_state in ("running", "paused"):
             remaining = self.get_remaining_timer_seconds()
             timer_font = pygame.font.Font(pygame.font.get_default_font(), max(56, int(0.18 * window_scale)))
@@ -1776,9 +1883,13 @@ class SRS:
             self.draw_timer_stats_overlay()
 
 
-    def draw_button(self, rect, hover, pressed, image=None, label=None, border=False, border_color=None, img_scale=button_img_scale, font=None, label_color=None, alpha=255):
+    def draw_button(self, rect, hover, pressed, image=None, label=None, border=False, border_color=None, img_scale=button_img_scale, font=None, label_color=None, alpha=255, normal_color=None, hover_color=None):
         if pressed:
             color = self.BUTTON_CLICKED_HOVER if hover else self.BUTTON_CLICKED
+        elif hover and hover_color is not None:
+            color = hover_color
+        elif normal_color is not None:
+            color = normal_color
         else:
             color = self.BUTTON_HOVER if hover else self.BUTTON_NORMAL
 
@@ -1932,22 +2043,89 @@ class SRS:
 
     def draw_manager_editor(self):
         selected_set = self.manager_selected_set() or ""
+        mouse_pos = pygame.mouse.get_pos()
         header = self.gaussian_font.render(self.get_ui_text(f"Editing: {selected_set}", f"Bearbeiten: {selected_set}"), True, self.BLUE)
-        self.screen.blit(header, (self.manager_detail_rect.left, self.manager_detail_rect.top - 5))
+        self.screen.blit(header, (self.manager_detail_rect.left, self.manager_detail_rect.top - 14))
+        pygame.draw.rect(self.screen, self.BUTTON_NORMAL, self.manager_search_rect, border_radius=4)
+        pygame.draw.rect(
+            self.screen,
+            self.BLUE if self.manager_search_focused else self.COORDINATE_SYSTEM,
+            self.manager_search_rect,
+            width=2,
+            border_radius=4,
+        )
+        search_text = self.manager_search_text
+        if self.manager_search_focused:
+            search_text += "_"
+        if not search_text.strip("_"):
+            search_text = self.get_ui_text("Search words... (Ctrl+F)", "Wörter suchen... (Strg+F)")
+        search_text = self.fit_manager_text(search_text, self.manager_search_rect.width - 12, keep_end=True)
+        search_color = self.TEXT if self.manager_search_text else self.COORDINATE_SYSTEM
+        search_surface = self.gaussian_font.render(search_text, True, search_color)
+        search_clip = self.manager_search_rect.inflate(-12, -4)
+        old_clip = self.screen.get_clip()
+        self.screen.set_clip(search_clip)
+        self.screen.blit(search_surface, (self.manager_search_rect.left + 6, self.manager_search_rect.centery - search_surface.get_height() // 2))
+        self.screen.set_clip(old_clip)
+        self.draw_button(
+            self.manager_search_prev_rect,
+            False,
+            False,
+            label="‹",
+            font=self.gaussian_font,
+            label_color="#FFFFFF",
+        )
+        self.draw_button(
+            self.manager_search_next_rect,
+            False,
+            False,
+            label="›",
+            font=self.gaussian_font,
+            label_color="#FFFFFF",
+        )
+        result_text = (
+            f"{self.manager_search_index + 1}/{len(self.manager_search_matches)}"
+            if self.manager_search_matches
+            else self.get_ui_text("No matches", "Keine Treffer")
+        )
+        result_surface = self.gaussian_font.render(result_text, True, self.TEXT)
+        self.screen.blit(result_surface, result_surface.get_rect(midleft=(self.manager_search_next_rect.right + 8, self.manager_search_rect.centery)))
+
         pygame.draw.rect(self.screen, self.GRID_COLOR, self.manager_table_rect, width=1)
-        column_x = self.manager_table_rect.left + 36
+        column_x = self.manager_table_rect.left + self.manager_index_width
         split_x = self.manager_table_rect.centerx
         source_header = self.gaussian_font.render(self.get_ui_text("Source", "Quelle"), True, self.TEXT)
         target_header = self.gaussian_font.render(self.get_ui_text("Target", "Ziel"), True, self.TEXT)
         self.screen.blit(source_header, (column_x, self.manager_table_rect.top - 21))
         self.screen.blit(target_header, (split_x + 6, self.manager_table_rect.top - 21))
+        current_match = (
+            self.manager_search_matches[self.manager_search_index]
+            if self.manager_search_index >= 0
+            else None
+        )
+        matching_columns_by_row = {}
+        for match_row, column in self.manager_search_matches:
+            matching_columns_by_row.setdefault(match_row, set()).add(column)
         for screen_row, row_index in enumerate(range(self.manager_scroll, min(len(self.manager_rows), self.manager_scroll + self.manager_visible_rows()))):
             row_rect = pygame.Rect(self.manager_table_rect.left, self.manager_table_rect.top + screen_row * self.manager_row_height, self.manager_table_rect.width, self.manager_row_height)
+            matching_columns = matching_columns_by_row.get(row_index, set())
+            if matching_columns:
+                pygame.draw.rect(self.screen, "#174F55", row_rect)
+            if current_match is not None and current_match[0] == row_index:
+                pygame.draw.rect(self.screen, "#23777B", row_rect)
             pygame.draw.line(self.screen, self.GRID_COLOR, row_rect.bottomleft, row_rect.bottomright)
             pygame.draw.line(self.screen, self.GRID_COLOR, (split_x, row_rect.top), (split_x, row_rect.bottom))
-            index_surface = self.gaussian_font.render(str(row_index), True, self.BLUE)
-            self.screen.blit(index_surface, index_surface.get_rect(midleft=(row_rect.left + 5, row_rect.centery + 3)))
+            index_surface = self.gaussian_font.render(str(row_index + 1), True, self.BLUE)
+            self.screen.blit(index_surface, index_surface.get_rect(midleft=(row_rect.left + 12, row_rect.centery + 3)))
             for column, x, right in ((0, column_x, split_x - 6), (1, split_x + 6, self.manager_table_rect.right - 6)):
+                if column in matching_columns:
+                    cell_highlight = "#2F9E99" if current_match == (row_index, column) else "#24736F"
+                    pygame.draw.rect(
+                        self.screen,
+                        cell_highlight,
+                        pygame.Rect(x - 4, row_rect.top + 2, right - x, row_rect.height - 4),
+                        border_radius=3,
+                    )
                 is_editing = row_index == self.manager_edit_row and column == self.manager_edit_column
                 value = self.manager_input if is_editing else self.manager_rows[row_index][column]
                 if is_editing:
@@ -1960,14 +2138,38 @@ class SRS:
                 self.screen.set_clip(old_clip)
         self.draw_button(
             self.manager_delete_row_button,
-            False,
+            self.manager_delete_row_button.collidepoint(mouse_pos),
             False,
             label=self.get_ui_text("Delete row", "Zeile loeschen"),
             font=self.gaussian_font,
             label_color="#FFFFFF",
         )
-        self.draw_button(self.manager_add_button, False, False, label=self.get_ui_text("Add row", "Zeile hinzufuegen"), font=self.gaussian_font, label_color="#FFFFFF")
-        self.draw_button(self.manager_back_button, False, False, label=self.get_ui_text("Back", "Zurueck"), font=self.gaussian_font, label_color="#FFFFFF")
+        self.draw_button(
+            self.manager_add_button,
+            self.manager_add_button.collidepoint(mouse_pos),
+            False,
+            label=self.get_ui_text("Add row", "Zeile hinzufuegen"),
+            font=self.gaussian_font,
+            label_color="#FFFFFF",
+        )
+        self.draw_button(
+            self.manager_editor_back_button,
+            self.manager_editor_back_button.collidepoint(mouse_pos),
+            False,
+            label=self.get_ui_text("Back", "Zurueck"),
+            font=self.gaussian_font,
+            label_color="#FFFFFF",
+        )
+        self.draw_button(
+            self.manager_save_button,
+            self.manager_save_button.collidepoint(mouse_pos),
+            False,
+            label=self.get_ui_text("Save", "Speichern"),
+            font=self.gaussian_font,
+            label_color="#FFFFFF",
+            normal_color="#28734B",
+            hover_color="#35A866",
+        )
 
 
     def draw_manager_message(self, text, y, bounds=None):
@@ -1997,7 +2199,7 @@ class SRS:
         self.screen.blit(title_surface, title_surface.get_rect(midtop=(panel.centerx, panel.top + int(0.12 * window_scale))))
 
         shortcut_groups = [
-            (self.get_ui_text("General", "Allgemein"), [("Ctrl + G", self.get_ui_text("Open settings", "Einstellungen öffnen")), ("Ctrl + E", self.get_ui_text("Edit previous word", "Vorheriges Wort bearbeiten")), ("Ctrl + F", self.get_ui_text("Change dataset", "Datensatz wechseln")), ("Ctrl + D", self.get_ui_text("Delete recent word from dataset", "Letztes Wort löschen"))]),
+            (self.get_ui_text("General", "Allgemein"), [("Ctrl + G", self.get_ui_text("Open settings", "Einstellungen öffnen")), ("Ctrl + E", self.get_ui_text("Edit previous word", "Vorheriges Wort bearbeiten")), ("Ctrl + F", self.get_ui_text("Open dataset manager / search words", "Datensatzverwaltung öffnen / Wörter suchen")), ("Ctrl + D", self.get_ui_text("Delete recent word from dataset", "Letztes Wort löschen"))]),
             (self.get_ui_text("Toggle settings", "Einstellungen"), [("Ctrl + L", self.get_ui_text("Toggle word order", "Wortreihenfolge umschalten")), ("Ctrl + T", self.get_ui_text("Toggle Gaussian weights", "Gauß-Gewichte umschalten"))]),
         ]
         row_height = max(20, int(0.12 * window_scale))
@@ -2525,21 +2727,56 @@ class SRS:
             return
 
         if event.type == pygame.KEYDOWN:
+            if event.mod & pygame.KMOD_CTRL and event.key == pygame.K_f and self.manager_mode in ("sets", "editor"):
+                if self.manager_mode == "sets":
+                    if self.manager_selected_set() is None:
+                        self.manager_message = self.get_ui_text("Select a dataset first", "Wähle zuerst einen Datensatz aus")
+                        return
+                    self.open_manager_editor()
+                self.open_manager_search()
+                return
+
             if event.key == pygame.K_ESCAPE:
-                if self.manager_edit_row is not None:
+                if self.manager_search_focused or self.manager_search_open:
+                    self.manager_search_focused = False
+                    self.manager_search_open = False
+                    return
+                if self.manager_mode == "editor":
+                    self.finish_manager_editor(save=False)
+                elif self.manager_edit_row is not None:
                     self.commit_manager_cell()
                     self.manager_edit_row = None
                     self.manager_edit_column = None
                     self.manager_input = ""
                     self.manager_input_changed = False
-                elif self.manager_mode == "editor":
-                    self.manager_mode = "sets"
-                    self.manager_message = ""
                 elif self.manager_mode in ("create", "confirm_delete"):
                     self.manager_mode = "sets"
                     self.manager_message = ""
                 else:
                     self.close_manager()
+                return
+            if self.manager_search_focused:
+                if event.key == pygame.K_RETURN:
+                    self.move_manager_search(-1 if event.mod & pygame.KMOD_SHIFT else 1)
+                elif event.key in (pygame.K_UP, pygame.K_LEFT):
+                    self.move_manager_search(-1)
+                elif event.key in (pygame.K_DOWN, pygame.K_RIGHT):
+                    self.move_manager_search(1)
+                elif event.key == pygame.K_TAB:
+                    self.manager_search_focused = False
+                elif event.key == pygame.K_BACKSPACE:
+                    if event.mod & pygame.KMOD_CTRL:
+                        parts = self.manager_search_text.rstrip().rsplit(None, 1)
+                        search_text = parts[0] if len(parts) > 1 else ""
+                    else:
+                        search_text = self.manager_search_text[:-1]
+                    self.set_manager_search_text(search_text)
+                elif event.mod & pygame.KMOD_CTRL and event.key == pygame.K_a:
+                    self.set_manager_search_text("")
+                elif event.unicode and event.unicode.isprintable():
+                    self.set_manager_search_text(
+                        self.append_input_character(self.manager_search_text, event.unicode)
+                    )
                 return
             if self.manager_mode == "create":
                 if event.key == pygame.K_RETURN:
@@ -2615,15 +2852,15 @@ class SRS:
                 return
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.manager_mode == "editor" and self.manager_save_button.collidepoint(mouse_pos):
+                self.finish_manager_editor(save=True)
+                return
+            if self.manager_mode == "editor" and self.manager_editor_back_button.collidepoint(mouse_pos):
+                self.finish_manager_editor(save=False)
+                return
             if self.manager_back_button.collidepoint(mouse_pos):
                 if self.manager_mode == "editor":
-                    self.commit_manager_cell()
-                    self.manager_mode = "sets"
-                    self.manager_edit_row = None
-                    self.manager_edit_column = None
-                    self.manager_input = ""
-                    self.manager_input_changed = False
-                    self.manager_message = ""
+                    self.finish_manager_editor(save=False)
                 elif self.manager_mode in ("confirm_delete", "create"):
                     self.manager_mode = "sets"
                     self.manager_message = ""
@@ -2650,6 +2887,21 @@ class SRS:
                 return
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.manager_mode == "editor":
+            if self.manager_search_rect.collidepoint(mouse_pos):
+                self.manager_search_open = True
+                self.manager_search_focused = True
+                return
+            if self.manager_search_prev_rect.collidepoint(mouse_pos):
+                self.manager_search_open = True
+                self.manager_search_focused = False
+                self.move_manager_search(-1)
+                return
+            if self.manager_search_next_rect.collidepoint(mouse_pos):
+                self.manager_search_open = True
+                self.manager_search_focused = False
+                self.move_manager_search(1)
+                return
+            self.manager_search_focused = False
             if self.manager_delete_row_button.collidepoint(mouse_pos):
                 self.delete_selected_manager_row()
                 return
@@ -2823,9 +3075,29 @@ class SRS:
             int(1.9 * window_scale),
         )
         self.manager_rect = pygame.Rect(int(0.4 * window_scale), int(0.25 * window_scale), self.WIDTH - int(0.8 * window_scale), self.HEIGHT - int(0.5 * window_scale))
-        self.manager_list_rect = pygame.Rect(self.manager_rect.left + 20, self.manager_rect.top + 100, self.manager_rect.width // 3 - 30, self.manager_rect.height - 175)
+        self.manager_list_rect = pygame.Rect(self.manager_rect.left + 20, self.manager_rect.top + 100, self.manager_rect.width // 3 - 50, self.manager_rect.height - 175)
         self.manager_detail_rect = pygame.Rect(self.manager_list_rect.right + 20, self.manager_list_rect.top, self.manager_rect.right - self.manager_list_rect.right - 40, self.manager_list_rect.height)
-        self.manager_table_rect = pygame.Rect(self.manager_detail_rect.left, self.manager_detail_rect.top + 70, self.manager_detail_rect.width, self.manager_detail_rect.height - 70)
+        self.manager_index_width = max(64, int(0.36 * window_scale))
+        self.manager_table_rect = pygame.Rect(self.manager_detail_rect.left, self.manager_detail_rect.top + 125, self.manager_detail_rect.width, self.manager_detail_rect.height - 125)
+        self.manager_search_rect = pygame.Rect(
+            self.manager_table_rect.left,
+            self.manager_detail_rect.top + 72,
+            int(self.manager_table_rect.width * 0.58),
+            max(26, int(0.15 * window_scale)),
+        )
+        search_button_size = self.manager_search_rect.height
+        self.manager_search_prev_rect = pygame.Rect(
+            self.manager_search_rect.right + 6,
+            self.manager_search_rect.top,
+            search_button_size,
+            search_button_size,
+        )
+        self.manager_search_next_rect = pygame.Rect(
+            self.manager_search_prev_rect.right + 5,
+            self.manager_search_rect.top,
+            search_button_size,
+            search_button_size,
+        )
         self.manager_row_height = max(28, int(0.17 * window_scale))
         button_width = int(0.62 * window_scale)
         button_height = int(0.23 * window_scale)
@@ -2835,7 +3107,15 @@ class SRS:
         self.manager_create_button = pygame.Rect(self.manager_edit_button.right + 10, button_y, button_width, button_height)
         self.manager_delete_button = pygame.Rect(self.manager_create_button.right + 10, button_y, button_width, button_height)
         self.manager_back_button = pygame.Rect(self.manager_rect.right - button_width - 20, button_y, button_width, button_height)
-        self.manager_add_button = pygame.Rect(self.manager_table_rect.right - button_width, self.manager_detail_rect.top - 6, button_width, button_height)
+        self.manager_save_button = self.manager_back_button.copy()
+        self.manager_editor_back_button = pygame.Rect(
+            self.manager_save_button.left - button_width - 10,
+            self.manager_save_button.top,
+            button_width,
+            button_height,
+        )
+        manager_actions_y = self.manager_detail_rect.top - 18
+        self.manager_add_button = pygame.Rect(self.manager_table_rect.right - button_width, manager_actions_y, button_width, button_height)
         self.manager_delete_row_button = pygame.Rect(
             self.manager_add_button.left - button_width - 10,
             self.manager_add_button.top,

@@ -4,8 +4,8 @@ build
 main.spec
 sets/*/data.csv
 sets/*/config/*
+sets/*/*.manager-backup
 data/*
 user_data
 log.txt
 __pycache__
-.vscode
