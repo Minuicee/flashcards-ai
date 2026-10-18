@@ -11,6 +11,7 @@ import sys
 import os
 import random
 import json
+import re
 import unicodedata
 from datetime import datetime
 
@@ -25,8 +26,8 @@ from datetime import datetime
 
 #before
 # TODO make ai local
-# TODO forma of latin vocab
-# TODO take l1 l2 avrg. oder das schlechtere?
+#!latin vocab
+#!lösung für screen voll
 
 #! exploration factor change
 #! klammern?
@@ -466,7 +467,10 @@ class SRS:
         # if the written words come up in the target assume it is a right answer
         input = self.filter(self.input_text)
         target_word = self.filter(self.target[self.current_index])
-        min_input_len = math.ceil(math.sqrt(sum([len(word) for word in target_word])))
+        min_length_translation = re.sub(r"\([^)]*\)", "", self.target[self.current_index])
+        min_input_len = math.ceil(math.sqrt(sum(
+            len(word) for word in self.filter(min_length_translation)
+        )))
         input_len = sum([len(word) for word in input])
 
         if input == ["idk"]:
