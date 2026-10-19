@@ -23,6 +23,7 @@ from datetime import datetime
 # TODO change gaussian range
 # TODO learning readiness / use data to predict learn span
 # TODO cluster levensthein distance
+# TODO learn in subgroups 
 
 #before
 # TODO make ai local
